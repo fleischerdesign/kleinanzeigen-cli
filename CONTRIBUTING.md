@@ -16,8 +16,8 @@ The dev shell provides the Rust toolchain, `clippy`, `rustfmt` and
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
 nix flake check
 ```
 
@@ -43,6 +43,7 @@ docs(readme): document the JSON contract
 - Do not use `unwrap` or `expect` in library code; tests may use them.
 - No browser automation, no Chromium, no captcha evasion.
 - No credentials, cookies or tokens in the repository, tests or logs.
+- Fixtures are synthetic; see [`tests/fixtures/README.md`](tests/fixtures/README.md).
 - Prefer small modules with explicit responsibilities.
 
 ## License

@@ -1,10 +1,13 @@
-//! Output helpers for JSON and human-readable text.
+//! Output helpers for the stable machine contract.
 
 use std::io::Write;
 
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+
+/// Version of the machine-readable JSON contract.
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Output format selected by the global `--json` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,30 +18,46 @@ pub enum Format {
     Json,
 }
 
+#[derive(Serialize)]
+struct Envelope<'a, T> {
+    schema_version: u32,
+    data: &'a T,
+}
+
 /// Writes a value as newline-terminated JSON to stdout.
+///
+/// Every command result is wrapped in an envelope carrying the schema version,
+/// so agents can detect contract changes without parsing the binary version.
 pub fn write_json<T: Serialize>(value: &T) -> Result<()> {
+    let envelope = Envelope {
+        schema_version: SCHEMA_VERSION,
+        data: value,
+    };
+
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    serde_json::to_writer(&mut lock, value)
+    serde_json::to_writer(&mut lock, &envelope)
         .map_err(|error| Error::Internal(format!("could not write JSON: {error}")))?;
     writeln!(lock).map_err(|error| Error::Internal(format!("could not write newline: {error}")))
 }
 
+#[derive(Serialize)]
+struct ErrorEnvelope<'a> {
+    schema_version: u32,
+    error: ErrorBody<'a>,
+}
+
+#[derive(Serialize)]
+struct ErrorBody<'a> {
+    code: &'a str,
+    message: String,
+}
+
 /// Writes a structured error as newline-terminated JSON to stderr.
 pub fn write_error_json(error: &Error) -> Result<()> {
-    #[derive(Serialize)]
-    struct Envelope<'a> {
-        error: Body<'a>,
-    }
-
-    #[derive(Serialize)]
-    struct Body<'a> {
-        code: &'a str,
-        message: String,
-    }
-
-    let envelope = Envelope {
-        error: Body {
+    let envelope = ErrorEnvelope {
+        schema_version: SCHEMA_VERSION,
+        error: ErrorBody {
             code: error.code(),
             message: error.to_string(),
         },

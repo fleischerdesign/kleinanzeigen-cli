@@ -1,9 +1,9 @@
 //! Search requests.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// A search request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchQuery {
     /// Free-text query.
     pub query: String,

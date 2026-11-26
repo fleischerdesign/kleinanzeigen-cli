@@ -1,13 +1,13 @@
 //! The boundary between the CLI and a concrete Kleinanzeigen access path.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::domain::{Listing, ListingId, SearchQuery};
 use crate::error::Result;
 
 /// One page of search results.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchPage {
     /// Listings on this page.
     pub items: Vec<Listing>,
@@ -16,6 +16,10 @@ pub struct SearchPage {
 }
 
 /// Read access to Kleinanzeigen.
+///
+/// Providers deserialize their own transport DTOs and convert them into the
+/// validated domain types. Account mutations belong to a separate capability,
+/// not to this read-only trait.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Searches listings.

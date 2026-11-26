@@ -12,9 +12,22 @@ fn doctor_json_is_stable() {
     assert!(output.status.success());
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
-    assert_eq!(value["status"], "ok");
-    assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
-    assert!(value["provider"].is_string());
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["data"]["status"], "ok");
+    assert_eq!(value["data"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(value["data"]["provider"].is_string());
+}
+
+#[test]
+fn json_mode_emits_structured_parse_errors() {
+    Command::cargo_bin("kleinanzeigen")
+        .expect("binary exists")
+        .args(["--json", "nope"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("\"schema_version\":1"))
+        .stderr(predicate::str::contains("\"code\":\"invalid_input\""));
 }
 
 #[test]

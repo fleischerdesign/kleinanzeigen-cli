@@ -3,13 +3,17 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use url::Url;
 
 use crate::error::{Error, Result};
 
 /// A Kleinanzeigen listing identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// The inner value is private and deserialization is deliberately not derived:
+/// every identifier goes through [`ListingId::new`], so an invalid value cannot
+/// enter the domain through a provider response.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ListingId(String);
 
@@ -46,14 +50,14 @@ impl fmt::Display for ListingId {
 }
 
 /// A parsed price.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Fields are private and deserialization is not derived. Providers deserialize
+/// their own DTOs and construct a validated value through [`Price::new`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Price {
-    /// Amount in euro cents.
-    pub amount_cents: i64,
-    /// ISO 4217 currency code.
-    pub currency: String,
-    /// Whether the seller accepts negotiation.
-    pub negotiable: bool,
+    amount_cents: i64,
+    currency: String,
+    negotiable: bool,
 }
 
 impl Price {
@@ -80,10 +84,25 @@ impl Price {
             negotiable,
         })
     }
+
+    /// Returns the amount in euro cents.
+    pub const fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
+
+    /// Returns the ISO 4217 currency code.
+    pub fn currency(&self) -> &str {
+        &self.currency
+    }
+
+    /// Returns whether the seller accepts negotiation.
+    pub const fn negotiable(&self) -> bool {
+        self.negotiable
+    }
 }
 
 /// A classified listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Listing {
     /// Listing identifier.
     pub id: ListingId,
@@ -125,8 +144,8 @@ mod tests {
     #[test]
     fn price_accepts_a_valid_value() {
         let price = Price::new(12_500, "EUR", true).expect("valid price");
-        assert_eq!(price.amount_cents, 12_500);
-        assert_eq!(price.currency, "EUR");
-        assert!(price.negotiable);
+        assert_eq!(price.amount_cents(), 12_500);
+        assert_eq!(price.currency(), "EUR");
+        assert!(price.negotiable());
     }
 }
