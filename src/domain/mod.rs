@@ -6,5 +6,5 @@ mod listing;
 /// Search requests.
 mod query;
 
-pub use listing::{Listing, ListingId, Price};
-pub use query::SearchQuery;
+pub use listing::{Attribute, Category, Listing, ListingId, Location, Price};
+pub use query::{SearchQuery, SearchSort};

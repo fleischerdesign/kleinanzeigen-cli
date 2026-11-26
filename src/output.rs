@@ -51,6 +51,8 @@ struct ErrorEnvelope<'a> {
 struct ErrorBody<'a> {
     code: &'a str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<u64>,
 }
 
 /// Writes a structured error as newline-terminated JSON to stderr.
@@ -60,6 +62,7 @@ pub fn write_error_json(error: &Error) -> Result<()> {
         error: ErrorBody {
             code: error.code(),
             message: error.to_string(),
+            retry_after_seconds: error.retry_after_seconds(),
         },
     };
 

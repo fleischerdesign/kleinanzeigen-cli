@@ -7,8 +7,12 @@ public issue for a vulnerability, a leaked token or account data.
 
 - Never commit cookies, session tokens, passwords or API credentials.
 - Use `.env.local` for local secrets; it is gitignored.
+- The mobile API credential is an app-level Basic credential, not a user
+  password. It still belongs in the environment, never in the repository.
 - The CLI must not print credentials, cookies or message contents in logs.
 - Test fixtures must be sanitized before they are committed.
+- If a credential is exposed, rotate it at the source; deleting a commit is not
+  enough.
 
 ## Scope
 

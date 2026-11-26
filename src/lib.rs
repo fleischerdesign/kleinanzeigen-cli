@@ -10,6 +10,9 @@
 /// Command-line parsing and the stable shell contract.
 pub mod cli;
 
+/// Command implementations.
+pub mod commands;
+
 /// Local diagnostics for the CLI.
 pub mod doctor;
 

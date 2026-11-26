@@ -1,6 +1,8 @@
 # Fixtures
 
-Fixtures in this directory are public artifacts. They must be synthetic.
+Fixtures in this directory are public artifacts. They must be synthetic. The
+`search.json` and `detail.json` pair models the mobile API response shape with
+invented listings, placeholder images and no live values.
 
 - No raw captures from the live site or the app.
 - No real names, email addresses, phone numbers, postal addresses, account IDs,

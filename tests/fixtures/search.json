@@ -1,0 +1,175 @@
+{
+  "searchOptions": {
+    "q": "synthetic",
+    "page": 2,
+    "size": 25
+  },
+  "{http://www.ebayclassifiedsgroup.com/schema/ad/v1}ads": {
+    "value": {
+      "ad": [
+        {
+          "id": 1234567890,
+          "title": {
+            "value": "Synthetic bike &amp; trailer"
+          },
+          "description": {
+            "value": "A <b>synthetic</b> description.<br />Second line."
+          },
+          "price": {
+            "currency-iso-code": {
+              "value": {
+                "value": "EUR",
+                "localized-label": "€"
+              }
+            },
+            "amount": {
+              "value": 12.5
+            },
+            "price-type": {
+              "value": "PLEASE_CONTACT"
+            }
+          },
+          "ad-address": {
+            "state": {
+              "value": "Teststadt"
+            },
+            "zip-code": {
+              "value": "12345"
+            }
+          },
+          "start-date-time": {
+            "value": "2026-11-26T23:48:37.000+0100"
+          },
+          "ad-status": {
+            "value": "ACTIVE"
+          },
+          "ad-type": {
+            "value": "OFFERED"
+          },
+          "poster-type": {
+            "value": "PRIVATE"
+          },
+          "category": {
+            "id": "87",
+            "localized-name": {
+              "value": "Synthetic category"
+            }
+          },
+          "link": [
+            {
+              "href": "https://www.example.invalid/s-anzeige/synthetic-bike/1234567890-87-12345",
+              "rel": "self-public-website"
+            }
+          ],
+          "pictures": {
+            "picture": [
+              {
+                "link": [
+                  {
+                    "href": "https://img.example.invalid/synthetic-bike-thumbnail.jpg",
+                    "rel": "thumbnail"
+                  },
+                  {
+                    "href": "https://img.example.invalid/synthetic-bike-large.jpg",
+                    "rel": "large"
+                  }
+                ]
+              }
+            ]
+          },
+          "attributes": {
+            "attribute": [
+              {
+                "name": "synthetic.condition",
+                "localized-label": "Condition",
+                "value": [
+                  {
+                    "value": "ok",
+                    "localized-label": "Good"
+                  }
+                ]
+              }
+            ]
+          },
+          "negotiation-enabled": {
+            "value": true
+          }
+        },
+        {
+          "id": 1234567891,
+          "title": {
+            "value": "Synthetic lamp"
+          },
+          "description": {
+            "value": "Another synthetic listing."
+          },
+          "price": {
+            "currency-iso-code": {
+              "value": {
+                "value": "EUR"
+              }
+            },
+            "amount": {
+              "value": 80
+            },
+            "price-type": {
+              "value": "SPECIFIED_AMOUNT"
+            }
+          },
+          "ad-address": {
+            "state": {
+              "value": "Beispielstadt"
+            },
+            "zip-code": {
+              "value": "54321"
+            }
+          },
+          "start-date-time": {
+            "value": "2026-11-25T10:00:00.000+0100"
+          },
+          "ad-status": {
+            "value": "ACTIVE"
+          },
+          "ad-type": {
+            "value": "OFFERED"
+          },
+          "poster-type": {
+            "value": "COMMERCIAL"
+          },
+          "category": {
+            "id": 80,
+            "localized-name": {
+              "value": "Synthetic category two"
+            }
+          },
+          "link": [
+            {
+              "href": "https://www.example.invalid/s-anzeige/synthetic-lamp/1234567891-80-54321",
+              "rel": "self-public-website"
+            }
+          ],
+          "pictures": {
+            "picture": []
+          },
+          "attributes": {
+            "attribute": []
+          }
+        }
+      ],
+      "paging": {
+        "numFound": "2",
+        "exactNumFound": "true",
+        "link": [
+          {
+            "href": "https://api.example.invalid/api/ads.json?page=2&size=25",
+            "rel": "self"
+          },
+          {
+            "href": "https://api.example.invalid/api/ads.json?page=3&size=25",
+            "rel": "next"
+          }
+        ]
+      }
+    }
+  }
+}

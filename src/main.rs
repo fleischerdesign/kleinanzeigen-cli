@@ -5,6 +5,7 @@
 use clap::Parser;
 use clap::error::ErrorKind;
 use kleinanzeigen_cli::cli::{Cli, Command};
+use kleinanzeigen_cli::commands;
 use kleinanzeigen_cli::doctor;
 use kleinanzeigen_cli::error::{Error, Result};
 use kleinanzeigen_cli::output::{Format, write_error_json};
@@ -62,8 +63,11 @@ fn parse_cli() -> Cli {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let format = cli.format();
     match cli.command {
-        Command::Doctor => doctor::run(cli.format()),
+        Command::Doctor => doctor::run(format),
+        Command::Search(args) => commands::search(args, format).await,
+        Command::Get(args) => commands::get(args, format).await,
     }
 }
 

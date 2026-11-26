@@ -4,7 +4,7 @@
 
 Unofficial, browser-free CLI for [Kleinanzeigen](https://www.kleinanzeigen.de). Built in Rust for agents and humans.
 
-> **Status:** early skeleton. The CLI surface, domain model, provider boundary and Nix packaging are in place. The mobile-API provider is the next milestone.
+> **Status:** read-only. `get` and `search` use the mobile API; there is no account login, no cache, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
 
 ## Why
 
@@ -33,11 +33,37 @@ From source:
 ```sh
 git clone https://github.com/fleischerdesign/kleinanzeigen-cli
 cd kleinanzeigen-cli
+cp .env.local.example .env.local
+$EDITOR .env.local
 direnv allow
 cargo build --locked --release
 ```
 
 The binary is `target/release/kleinanzeigen`.
+
+## Provider configuration
+
+The mobile API needs the app-level Basic credential that the Android app embeds.
+It is not a user password and it is not distributed with this repository. Put it
+in `.env.local`, which is gitignored:
+
+```sh
+KLEINANZEIGEN_BASIC_USER=...
+KLEINANZEIGEN_BASIC_PW=...
+```
+
+`direnv` loads `.env.local` through `.envrc`; a plain shell needs the variables
+exported. The credential can change when the app updates. If it does, `get` and
+`search` fail with exit code `4` and a message to update the two values.
+
+Optional overrides:
+
+- `KLEINANZEIGEN_BASE_URL` — default `https://api.kleinanzeigen.de`; plain
+  `http` is accepted only for loopback tests.
+- `KLEINANZEIGEN_APP_VERSION` — default `2026.25.0`; the version sent in the app
+  headers.
+
+No account login, cookie import or browser is used.
 
 ## Usage
 
@@ -45,24 +71,31 @@ The binary is `target/release/kleinanzeigen`.
 kleinanzeigen doctor
 kleinanzeigen doctor --json
 kleinanzeigen --help
+
+# Search one page.
+kleinanzeigen search "raspberry pi" --max-price 80 --limit 10 --json
+
+# Follow the cursor from the previous result.
+kleinanzeigen search "raspberry pi" --cursor 2 --json
+
+# Fetch one listing.
+kleinanzeigen get 1234567890 --json
 ```
 
-Planned commands:
+Search filters: `--category <ID>`, `--location-id <ID>`, `--radius <KM>`,
+`--min-price <EUROS>`, `--max-price <EUROS>`, `--limit <1-50>`, `--cursor`,
+`--sort <date-descending|price-ascending|price-descending|distance-ascending>`.
+Prices are decimal euros, not floats in the shell. Search is limited to offered
+ads and one page per request.
 
-```sh
-kleinanzeigen search "raspberry pi" --max-price 80 --json
-kleinanzeigen get 3399373623 --json
-kleinanzeigen watch "fendt bianco" --interval 15m
-kleinanzeigen login
-kleinanzeigen ads list
-kleinanzeigen draft create --from draft.json
-kleinanzeigen draft publish <draft-id> --confirm
-kleinanzeigen messages list --unread
-```
+Planned, not implemented: `watch`, `login`, own ads, drafts and publishing,
+messages, MCP.
 
 ## JSON contract
 
 Success goes to stdout:
+
+Doctor:
 
 ```json
 {
@@ -72,19 +105,61 @@ Success goes to stdout:
     "version": "0.1.0",
     "platform": "linux",
     "arch": "x86_64",
-    "provider": "not configured",
+    "provider": "mobile-api (configured)",
+    "app_version": "2026.25.0",
     "notes": [
       "No browser or Chromium is required.",
-      "The mobile-API provider is not implemented yet."
+      "Read-only: detail and search use the mobile API."
     ]
   }
 }
 ```
 
-Errors go to stderr as structured JSON:
+One search result:
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "items": [
+      {
+        "id": "1234567890",
+        "title": "Synthetic bike & trailer",
+        "url": "https://www.example.invalid/s-anzeige/synthetic-bike/1234567890-87-12345",
+        "price": { "amount_cents": 1250, "currency": "EUR", "negotiable": true },
+        "price_type": "PLEASE_CONTACT",
+        "location": { "city": "Teststadt", "postal_code": "12345" },
+        "description": "A synthetic description.",
+        "posted_at": "2026-11-26T23:48:37+01:00",
+        "status": "ACTIVE",
+        "ad_type": "OFFERED",
+        "poster_type": "PRIVATE",
+        "category": { "id": "87", "name": "Synthetic category" },
+        "images": ["https://img.example.invalid/synthetic-bike-large.jpg"],
+        "attributes": [
+          { "name": "synthetic.condition", "label": "Condition", "value": "Good" }
+        ]
+      }
+    ],
+    "total": 2,
+    "page": 1,
+    "size": 25,
+    "next_cursor": "2"
+  }
+}
+```
+
+`get` returns one listing object in `data`. Errors go to stderr as structured
+JSON:
 
 ```json
 {"schema_version":1,"error":{"code":"invalid_input","message":"invalid input: listing id must be a non-empty numeric string"}}
+```
+
+A temporary failure may include the provider's retry hint:
+
+```json
+{"schema_version":1,"error":{"code":"temporary","message":"temporary failure: provider rate limit reached (HTTP 429)","retry_after_seconds":30}}
 ```
 
 Exit codes:
@@ -106,6 +181,9 @@ Exit codes:
 - On failure, stderr contains exactly one JSON error object; logs are suppressed in JSON mode.
 - `--help` and `--version` are plaintext and exit `0`; they are not command results.
 - Every object carries `schema_version`. It changes only when the machine contract changes, independent of the binary version.
+- Search pages carry `total`, `page`, `size` and `next_cursor`. The cursor is opaque: pass it back as `--cursor`.
+- `posted_at` is an RFC 3339 string or `null`.
+- `retry_after_seconds` appears only when the provider sent a numeric `Retry-After` header.
 - `watch` will emit newline-delimited JSON (one event per line) with the same `schema_version`; a stream failure ends with the error object.
 
 ## Supported platforms
@@ -123,23 +201,47 @@ src/
 ├── main.rs        binary entry point, exit-code mapping
 ├── lib.rs         library root, module contract
 ├── cli.rs         clap surface and the shell contract
+├── commands/      search and get implementations
 ├── doctor.rs      local diagnostics
 ├── error.rs       typed errors and stable exit codes
 ├── output.rs      JSON and human-readable output
 ├── domain/
-│   ├── listing.rs listing ids, prices and listings
-│   └── query.rs   search requests
+│   ├── listing.rs listing ids, prices, locations, categories, listings
+│   └── query.rs   search requests and sort order
 └── provider/
-    └── mod.rs     Provider trait and search page
+    ├── mod.rs     Provider trait and search page
+    └── mobile_api/
+        ├── mod.rs        endpoint and HTTP orchestration
+        ├── config.rs     environment settings and app Basic auth
+        ├── dto.rs        transport DTOs
+        ├── convert.rs    DTO-to-domain conversion and validation
+        ├── html.rs       conservative text normalization
+        └── transport.rs  reqwest transport boundary
 ```
 
 The provider is deliberately isolated: a mobile-API change must not leak into
-the domain or the CLI. The concrete provider will live under
-`provider::mobile_api` and implement `Provider`.
+the domain or the CLI. The `Provider` trait is read-only; account mutations will
+be a separate capability.
 
 Domain types validate their invariants (`ListingId`, `Price`); providers
-deserialize their own DTOs and convert explicitly. The CLI JSON is an output
-contract, not a serialization of internal structs.
+deserialize their own DTOs and convert explicitly. A malformed provider
+response is a format error, not a silently skipped listing. The CLI JSON is an
+output contract, not a serialization of internal structs.
+
+## Data and privacy
+
+- No browser, no cookies and no account login for reads.
+- The app-level Basic credential is supplied through `.env.local` or the
+  environment and is never committed.
+- No telemetry, no cache and no state beyond the process.
+- Exact coordinates, contact names, phone numbers and account identifiers are
+  intentionally not emitted; the CLI exposes city, postal code, listing data and
+  public image URLs.
+- Logs never contain `Authorization`, the app install id, tokens or response
+  bodies. JSON mode suppresses logs entirely.
+- One request per invocation, no automatic retries, a 25-second timeout, a
+  maximum page size of 50 and an 8 MiB response cap. A numeric `Retry-After`
+  header is surfaced as `retry_after_seconds`.
 
 ## Development
 
@@ -160,6 +262,7 @@ The dev shell provides `cargo`, `rustc`, `rustfmt`, `clippy` and `rust-analyzer`
 
 The roadmap is ordered by evidence, not by feature count. Each step has an
 abort condition; a later step does not start on an unproven earlier one.
+Milestones 1 and 2 are implemented for the read path; later milestones are not.
 
 ### 1. Access decision and transport spike
 
@@ -240,6 +343,10 @@ research references:
 - [`its-me-prash/kleinanzeigen-reader`](https://github.com/its-me-prash/kleinanzeigen-reader) (MIT) — listing extraction, JSON-LD/GTM fields and mobile-API notes.
 - [`DanielWTE/ebay-kleinanzeigen-api`](https://github.com/DanielWTE/ebay-kleinanzeigen-api) (MIT) — API schema and error semantics.
 - [`Second-Hand-Friends/kleinanzeigen-bot`](https://github.com/Second-Hand-Friends/kleinanzeigen-bot) (AGPL-3.0) — listing states and YAML behavior as a domain reference only.
+
+The transport was verified with ordinary HTTPS and the app headers; no Chrome
+TLS impersonation is required. `monkrel` uses impersonation, but this client does
+not, and it does not include the app credential.
 
 No AGPL code is included in this repository. If code is ported from an MIT
 project, its copyright and license notice will be preserved.

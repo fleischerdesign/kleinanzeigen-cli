@@ -6,11 +6,20 @@ use serde::Serialize;
 use crate::domain::{Listing, ListingId, SearchQuery};
 use crate::error::Result;
 
+/// The mobile API provider.
+pub mod mobile_api;
+
 /// One page of search results.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchPage {
     /// Listings on this page.
     pub items: Vec<Listing>,
+    /// Total number of matches reported by the provider.
+    pub total: u64,
+    /// One-based page number that produced this page.
+    pub page: u32,
+    /// Requested page size.
+    pub size: u32,
     /// Cursor for the next page, if any.
     pub next_cursor: Option<String>,
 }
@@ -41,6 +50,9 @@ mod tests {
         async fn search(&self, _query: &SearchQuery) -> Result<SearchPage> {
             Ok(SearchPage {
                 items: Vec::new(),
+                total: 0,
+                page: 1,
+                size: 25,
                 next_cursor: None,
             })
         }

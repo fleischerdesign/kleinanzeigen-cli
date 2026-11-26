@@ -1,0 +1,93 @@
+{
+  "{http://www.ebayclassifiedsgroup.com/schema/ad/v1}ad": {
+    "value": {
+      "id": "1234567890",
+      "title": {
+        "value": "Synthetic bike &amp; trailer"
+      },
+      "description": {
+        "value": "A <b>synthetic</b> description.<br />Second line."
+      },
+      "price": {
+        "currency-iso-code": {
+          "value": {
+            "value": "EUR",
+            "localized-label": "€"
+          }
+        },
+        "amount": {
+          "value": 12.5
+        },
+        "price-type": {
+          "value": "PLEASE_CONTACT"
+        }
+      },
+      "ad-address": {
+        "state": {
+          "value": "Teststadt"
+        },
+        "zip-code": {
+          "value": "12345"
+        }
+      },
+      "start-date-time": {
+        "value": "2026-11-26T23:48:37.000+0100"
+      },
+      "last-user-edit-date": {},
+      "ad-status": {
+        "value": "ACTIVE"
+      },
+      "ad-type": {
+        "value": "OFFERED"
+      },
+      "poster-type": {
+        "value": "PRIVATE"
+      },
+      "category": {
+        "id": "87",
+        "localized-name": {
+          "value": "Synthetic category"
+        }
+      },
+      "link": [
+        {
+          "href": "https://www.example.invalid/s-anzeige/synthetic-bike/1234567890-87-12345",
+          "rel": "self-public-website"
+        }
+      ],
+      "pictures": {
+        "picture": [
+          {
+            "link": [
+              {
+                "href": "https://img.example.invalid/synthetic-bike-thumbnail.jpg",
+                "rel": "thumbnail"
+              },
+              {
+                "href": "https://img.example.invalid/synthetic-bike-large.jpg",
+                "rel": "large"
+              }
+            ]
+          }
+        ]
+      },
+      "attributes": {
+        "attribute": [
+          {
+            "name": "synthetic.condition",
+            "localized-label": "Condition",
+            "value": [
+              {
+                "value": "ok",
+                "localized-label": "Good"
+              }
+            ]
+          }
+        ]
+      },
+      "negotiation-enabled": {
+        "value": true
+      }
+    }
+  }
+}

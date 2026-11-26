@@ -4,6 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::Serialize;
+use time::OffsetDateTime;
 use url::Url;
 
 use crate::error::{Error, Result};
@@ -101,6 +102,47 @@ impl Price {
     }
 }
 
+/// A human-readable listing location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Location {
+    /// City or municipality, if the provider exposes one.
+    pub city: Option<String>,
+    /// Postal code, if the provider exposes one.
+    pub postal_code: Option<String>,
+}
+
+impl Location {
+    /// Creates a location from optional city and postal-code parts.
+    pub const fn new(city: Option<String>, postal_code: Option<String>) -> Self {
+        Self { city, postal_code }
+    }
+
+    /// Returns whether neither part is present.
+    pub const fn is_empty(&self) -> bool {
+        self.city.is_none() && self.postal_code.is_none()
+    }
+}
+
+/// A listing category.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Category {
+    /// Provider category identifier.
+    pub id: String,
+    /// Human-readable category name.
+    pub name: String,
+}
+
+/// One provider attribute of a listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Attribute {
+    /// Stable provider attribute name.
+    pub name: String,
+    /// Human-readable attribute label.
+    pub label: String,
+    /// Human-readable value.
+    pub value: String,
+}
+
 /// A classified listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Listing {
@@ -112,8 +154,28 @@ pub struct Listing {
     pub url: Url,
     /// Parsed price, if the listing shows one.
     pub price: Option<Price>,
+    /// Provider price classification, for example `SPECIFIED_AMOUNT` or
+    /// `PLEASE_CONTACT`.
+    pub price_type: Option<String>,
     /// Human-readable location, if available.
-    pub location: Option<String>,
+    pub location: Option<Location>,
+    /// Plain-text description, if available.
+    pub description: Option<String>,
+    /// Publication time reported by the provider.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub posted_at: Option<OffsetDateTime>,
+    /// Provider listing status, for example `ACTIVE`.
+    pub status: Option<String>,
+    /// Provider ad type, for example `OFFERED` or `WANTED`.
+    pub ad_type: Option<String>,
+    /// Provider poster type, for example `PRIVATE` or `COMMERCIAL`.
+    pub poster_type: Option<String>,
+    /// Category, if available.
+    pub category: Option<Category>,
+    /// Public image URLs, largest variant first.
+    pub images: Vec<Url>,
+    /// Provider attributes with their human-readable labels.
+    pub attributes: Vec<Attribute>,
 }
 
 #[cfg(test)]
@@ -147,5 +209,11 @@ mod tests {
         assert_eq!(price.amount_cents(), 12_500);
         assert_eq!(price.currency(), "EUR");
         assert!(price.negotiable());
+    }
+
+    #[test]
+    fn empty_location_is_reported() {
+        assert!(Location::new(None, None).is_empty());
+        assert!(!Location::new(Some("Berlin".to_owned()), None).is_empty());
     }
 }
