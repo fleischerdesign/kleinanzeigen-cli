@@ -158,13 +158,71 @@ The dev shell provides `cargo`, `rustc`, `rustfmt`, `clippy` and `rust-analyzer`
 
 ## Roadmap
 
-1. **Transport spike.** `rquest` with Chrome impersonation against the mobile API; one search request and one detail request, with sanitized, synthetic fixtures.
-2. **Read-only.** `search`, `get`, `watch`; typed models, SQLite cache, rate limiting.
-3. **Auth.** Login, session token, `doctor` checks.
-4. **Own ads.** List, pause, activate, delete, renew.
-5. **Drafts and publishing.** JSON/YAML input, `--dry-run`, `--confirm <plan-id>`, audit log.
-6. **Messages.** List and reply with explicit confirmation.
-7. **MCP wrapper.** Optional, on the same CLI/JSON contract; no second transport.
+The roadmap is ordered by evidence, not by feature count. Each step has an
+abort condition; a later step does not start on an unproven earlier one.
+
+### 1. Access decision and transport spike
+
+Record in [`docs/access.md`](docs/access.md) which access covers each function.
+Prove one detail read over the chosen mobile-API transport; add a search read
+only if the same transport supports it. Convert the response into a domain
+object and derive a sanitized, synthetic fixture. Before the first provider
+commit, decide config/state paths, request budget and log redaction.
+
+**Abort:** the transport cannot produce a stable, interpretable detail read.
+Do not build the rest on it.
+
+**Risk:** the mobile API is private and can change with app updates. Record
+that dependency explicitly; do not present it as a public contract.
+
+**Not included:** login, live mutations, `watch`, SQLite.
+
+### 2. Usable read release
+
+`get` first, then `search` with limit and cursor if the transport supports both.
+Versioned JSON, stable errors, bounded reads, `Retry-After`. Publish the CLI,
+synthetic tests and Nix package with this scope.
+
+**Abort:** `get` is not reliably interpretable. If only `search` is unstable,
+ship `get` alone.
+
+**Not included:** `watch`, SQLite, account features, release automation.
+
+### 3. Session and own ads read
+
+Build a supported login and one account read operation as one slice. Before
+that, decide token expiry, refresh/logout and account binding. Use the OS
+keyring or an explicitly protected secret file for headless use; `doctor`
+reports status, never secrets.
+
+**Abort:** no safe session lifecycle (captcha/MFA, token storage) — stay
+read-only.
+
+**Not included:** mutations, browser cookie import, raw credential capture.
+
+### 4. First mutation and local drafts
+
+Build the plan envelope — account, target, change — and require `--dry-run`,
+`--confirm <plan-id>` and a redacted audit log **before** the first write.
+Start with pause and activate. Local JSON drafts can land in parallel; publish
+only after this path, with its own preview.
+
+**Abort:** the confirmed plan cannot be bound to the exact mutation, or an
+unknown outcome cannot be handled safely. Never retry blindly after a timeout
+without an idempotency guarantee.
+
+**Not included:** delete, paid renew, YAML, messages.
+
+### 5. Extensions as needed
+
+Read messages first; replies are separately confirmed. `watch` only with a
+viable polling budget; SQLite only with a proven need for persistent state.
+Renew and delete deliberately separate. MCP only after a stable CLI contract.
+
+**Abort:** unclear cost, permission, load budget or concrete user need for the
+individual feature.
+
+**Not included:** an obligation to implement every optional feature.
 
 ## Fixture policy
 
