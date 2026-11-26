@@ -11,7 +11,8 @@ use crate::output::Format;
     version,
     about = "Unofficial, browser-free CLI for Kleinanzeigen",
     long_about = None,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    color = clap::ColorChoice::Never
 )]
 pub struct Cli {
     /// Emit machine-readable JSON on stdout.

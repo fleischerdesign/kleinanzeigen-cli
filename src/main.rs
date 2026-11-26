@@ -42,7 +42,14 @@ fn parse_cli() -> Cli {
                 std::process::exit(2);
             }
             _ => {
-                let error = Error::Input(error.to_string().trim().to_owned());
+                let message = error
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or("invalid command line")
+                    .trim_start_matches("error: ")
+                    .to_owned();
+                let error = Error::Input(message);
                 if json_requested {
                     let _ = write_error_json(&error);
                 } else {

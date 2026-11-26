@@ -27,7 +27,9 @@ fn json_mode_emits_structured_parse_errors() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("\"schema_version\":1"))
-        .stderr(predicate::str::contains("\"code\":\"invalid_input\""));
+        .stderr(predicate::str::contains("\"code\":\"invalid_input\""))
+        .stderr(predicate::str::contains("unrecognized subcommand 'nope'"))
+        .stderr(predicate::str::contains("Usage").not());
 }
 
 #[test]
