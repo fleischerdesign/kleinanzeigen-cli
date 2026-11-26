@@ -1,0 +1,31 @@
+[package]
+name = "kleinanzeigen-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Unofficial, browser-free CLI for Kleinanzeigen"
+license = "MIT"
+repository = "https://github.com/fleischerdesign/kleinanzeigen-cli"
+homepage = "https://github.com/fleischerdesign/kleinanzeigen-cli"
+readme = "README.md"
+keywords = ["kleinanzeigen", "classifieds", "cli", "agent"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "kleinanzeigen"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
