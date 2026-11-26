@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -21,8 +22,34 @@ fn command() -> Command {
 fn serve_once(body: &'static str) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
     let address = listener.local_addr().expect("test server address");
+    listener
+        .set_nonblocking(true)
+        .expect("non-blocking test server");
     let handle = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept request");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept request: {error}"),
+            }
+        };
+        stream
+            .set_nonblocking(false)
+            .expect("blocking client stream");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("write timeout");
+
+        let mut stream = stream;
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
         let mut line = String::new();
         reader.read_line(&mut line).expect("read request line");
