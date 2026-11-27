@@ -1,8 +1,10 @@
 //! Public discovery commands.
 
-use crate::cli::{ProfileArgs, SellerOtherArgs, SimilarArgs, StatsArgs};
-use crate::domain::{AdStats, ListingId, SellerProfile};
-use crate::error::Result;
+use crate::cli::{
+    GalleryArgs, ImagesArgs, ProfileArgs, SellerOtherArgs, SimilarArgs, StatsArgs, StatsBatchArgs,
+};
+use crate::domain::{AdStats, ImageSet, ListingId, SellerProfile};
+use crate::error::{Error, Result};
 use crate::output::{Format, write_json};
 use crate::provider::ListingList;
 
@@ -23,10 +25,31 @@ pub async fn seller_other(args: SellerOtherArgs, format: Format) -> Result<()> {
 }
 
 /// Fetches the public homepage gallery.
-pub async fn gallery(format: Format) -> Result<()> {
+pub async fn gallery(args: GalleryArgs, format: Format) -> Result<()> {
+    let start_page = args.start_page().map_err(Error::Input)?;
     let provider = super::provider()?;
-    let list = provider.gallery().await?;
-    output_list(&list, format)
+    let page = provider.gallery(start_page, args.pages, args.limit).await?;
+    match format {
+        Format::Json => write_json(&page),
+        Format::Human => {
+            super::print_search_page(&page);
+            Ok(())
+        }
+    }
+}
+
+/// Fetches all public image variants of one listing.
+pub async fn images(args: ImagesArgs, format: Format) -> Result<()> {
+    let id = ListingId::new(args.id)?;
+    let provider = super::provider()?;
+    let images = provider.images(&id).await?;
+    match format {
+        Format::Json => write_json(&images),
+        Format::Human => {
+            print_images(&images);
+            Ok(())
+        }
+    }
 }
 
 /// Fetches one public seller profile.
@@ -56,6 +79,26 @@ pub async fn stats(args: StatsArgs, format: Format) -> Result<()> {
     }
 }
 
+/// Fetches public counters for multiple listings.
+pub async fn stats_batch(args: StatsBatchArgs, format: Format) -> Result<()> {
+    let ids = args
+        .ids
+        .iter()
+        .map(|id| ListingId::new(id.as_str()))
+        .collect::<Result<Vec<_>>>()?;
+    let provider = super::provider()?;
+    let stats = provider.stats_batch(&ids).await?;
+    match format {
+        Format::Json => write_json(&stats),
+        Format::Human => {
+            for entry in &stats {
+                print_stats(entry);
+            }
+            Ok(())
+        }
+    }
+}
+
 fn output_list(list: &ListingList, format: Format) -> Result<()> {
     match format {
         Format::Json => write_json(list),
@@ -63,6 +106,13 @@ fn output_list(list: &ListingList, format: Format) -> Result<()> {
             super::print_listing_list(list);
             Ok(())
         }
+    }
+}
+
+fn print_images(images: &ImageSet) {
+    println!("id: {}", images.id);
+    for variant in &images.variants {
+        println!("{}\t{}", variant.rel, variant.url);
     }
 }
 

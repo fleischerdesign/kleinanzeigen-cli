@@ -82,6 +82,7 @@ fn walk_location(node: LocationNode, out: &mut Vec<LocationRef>, seen: &mut Hash
         id_name,
         localized_name,
         location,
+        ..
     } = node;
     let name = id_name
         .and_then(|value| value.value)

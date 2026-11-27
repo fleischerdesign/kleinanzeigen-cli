@@ -277,6 +277,40 @@ pub(crate) struct LocationNode {
     #[serde(rename = "localized-name")]
     pub(crate) localized_name: Option<Value<String>>,
     pub(crate) location: Option<OneOrMany<Box<LocationNode>>>,
+    pub(crate) latitude: Option<Value<FlexibleString>>,
+    pub(crate) longitude: Option<Value<FlexibleString>>,
+    pub(crate) radius: Option<Value<FlexibleString>>,
+    #[serde(rename = "parent-id")]
+    pub(crate) parent_id: Option<Value<FlexibleString>>,
+    #[serde(rename = "children-count")]
+    pub(crate) children_count: Option<Value<FlexibleString>>,
+}
+
+/// Location detail response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationDetailResponse {
+    #[serde(rename = "{http://www.ebayclassifiedsgroup.com/schema/location/v1}location")]
+    pub(crate) location: LocationDetailEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationDetailEnvelope {
+    pub(crate) value: LocationNode,
+}
+
+/// One public flag reason, possibly nested.
+#[derive(Debug, Deserialize)]
+pub(crate) struct FlagReason {
+    pub(crate) id: Option<FlexibleString>,
+    pub(crate) title: Option<FlexibleString>,
+    pub(crate) submittable: Option<FlexibleBool>,
+    #[serde(rename = "allowAnonymous")]
+    pub(crate) allow_anonymous: Option<FlexibleBool>,
+    #[serde(rename = "allowGuest")]
+    pub(crate) allow_guest: Option<FlexibleBool>,
+    #[serde(rename = "textRequired")]
+    pub(crate) text_required: Option<FlexibleBool>,
+    pub(crate) subreasons: Option<OneOrMany<Box<FlagReason>>>,
 }
 
 /// Public seller profile response.

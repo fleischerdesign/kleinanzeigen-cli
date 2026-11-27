@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::domain::{AdType, SearchQuery, SearchSort};
+use crate::domain::{AdType, PosterType, SearchQuery, SearchSort};
 use crate::output::Format;
 
 /// Unofficial, browser-free CLI for Kleinanzeigen.
@@ -67,13 +67,25 @@ pub enum Command {
     SellerOther(SellerOtherArgs),
 
     /// Fetch the public homepage gallery.
-    Gallery,
+    Gallery(GalleryArgs),
+
+    /// Fetch all public image variants of one listing.
+    Images(ImagesArgs),
 
     /// Fetch a public seller profile.
     Profile(ProfileArgs),
 
     /// Fetch public view and watchlist counters.
     Stats(StatsArgs),
+
+    /// Fetch public counters for one or more listings.
+    StatsBatch(StatsBatchArgs),
+
+    /// Fetch one public location detail.
+    Location(LocationArgs),
+
+    /// List public reporting reasons.
+    FlagReasons,
 
     /// Fetch search metadata for a category.
     SearchMetadata(SearchMetadataArgs),
@@ -122,6 +134,10 @@ pub struct SearchFilters {
     /// Search for offered or wanted ads.
     #[arg(long, value_name = "TYPE", value_enum, default_value = "offered")]
     pub ad_type: AdTypeArg,
+
+    /// Restrict to private or commercial sellers.
+    #[arg(long, value_name = "TYPE", value_enum)]
+    pub poster_type: Option<PosterTypeArg>,
 
     /// Only return ads with at least one picture.
     #[arg(long)]
@@ -179,6 +195,7 @@ impl SearchFilters {
         query.min_price_cents = self.min_price_cents;
         query.max_price_cents = self.max_price_cents;
         query.ad_type = self.ad_type.into();
+        query.poster_type = self.poster_type.map(PosterType::from);
         query.picture_required = self.picture_required;
         query.buy_now_only = self.buy_now_only;
         query.include_top_ads = self.include_top_ads;
@@ -319,6 +336,50 @@ pub struct SellerOtherArgs {
     pub id: String,
 }
 
+/// Arguments for `gallery`.
+#[derive(Debug, Args)]
+pub struct GalleryArgs {
+    /// Number of gallery pages to fetch, 1 to 10.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..=10)
+    )]
+    pub pages: u32,
+
+    /// Page size, 1 to 50.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u32).range(1..=50)
+    )]
+    pub limit: u32,
+
+    /// Opaque cursor from a previous gallery page.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
+}
+
+impl GalleryArgs {
+    /// Returns the one-based gallery page selected by the cursor.
+    pub fn start_page(&self) -> Result<u32, String> {
+        match &self.cursor {
+            Some(cursor) => parse_page_cursor(cursor),
+            None => Ok(1),
+        }
+    }
+}
+
+/// Arguments for `images`.
+#[derive(Debug, Args)]
+pub struct ImagesArgs {
+    /// Numeric listing identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub id: String,
+}
+
 /// Arguments for `profile`.
 #[derive(Debug, Args)]
 pub struct ProfileArgs {
@@ -331,6 +392,27 @@ pub struct ProfileArgs {
 #[derive(Debug, Args)]
 pub struct StatsArgs {
     /// Numeric listing identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub id: String,
+}
+
+/// Arguments for `stats-batch`.
+#[derive(Debug, Args)]
+pub struct StatsBatchArgs {
+    /// Numeric listing identifiers.
+    #[arg(
+        required = true,
+        value_name = "ID",
+        value_parser = parse_numeric_id,
+        num_args = 1..=20
+    )]
+    pub ids: Vec<String>,
+}
+
+/// Arguments for `location`.
+#[derive(Debug, Args)]
+pub struct LocationArgs {
+    /// Numeric location identifier.
     #[arg(value_parser = parse_numeric_id)]
     pub id: String,
 }
@@ -357,6 +439,24 @@ impl From<AdTypeArg> for AdType {
         match value {
             AdTypeArg::Offered => Self::Offered,
             AdTypeArg::Wanted => Self::Wanted,
+        }
+    }
+}
+
+/// Poster type accepted on the command line.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PosterTypeArg {
+    /// Private sellers.
+    Private,
+    /// Commercial sellers.
+    Commercial,
+}
+
+impl From<PosterTypeArg> for PosterType {
+    fn from(value: PosterTypeArg) -> Self {
+        match value {
+            PosterTypeArg::Private => Self::Private,
+            PosterTypeArg::Commercial => Self::Commercial,
         }
     }
 }
@@ -455,6 +555,16 @@ fn parse_non_negative_f64(value: &str) -> Result<f64, String> {
 }
 
 /// Parses a watch interval. The minimum is 30 seconds.
+pub(crate) fn parse_page_cursor(cursor: &str) -> Result<u32, String> {
+    let page = cursor
+        .parse::<u32>()
+        .map_err(|_| "cursor must be a positive page number".to_owned())?;
+    if page == 0 {
+        return Err("cursor must be a positive page number".to_owned());
+    }
+    Ok(page)
+}
+
 pub(crate) fn parse_interval(value: &str) -> Result<Duration, String> {
     let value = value.trim();
     let (number, factor) = if let Some(number) = value.strip_suffix('s') {
@@ -513,6 +623,8 @@ mod tests {
             "12.50",
             "--ad-type",
             "wanted",
+            "--poster-type",
+            "private",
             "--picture-required",
             "--buy-now-only",
             "--include-top-ads",
@@ -540,6 +652,7 @@ mod tests {
         assert_eq!(query.location.as_deref(), Some("Berlin"));
         assert_eq!(query.min_price_cents, Some(1_250));
         assert_eq!(query.ad_type, AdType::Wanted);
+        assert_eq!(query.poster_type, Some(PosterType::Private));
         assert!(query.picture_required);
         assert!(query.buy_now_only);
         assert!(query.include_top_ads);
@@ -605,6 +718,38 @@ mod tests {
         assert!(parse_interval("29s").is_err());
         assert!(parse_interval("15").is_err());
         assert!(parse_interval("5x").is_err());
+    }
+
+    #[test]
+    fn gallery_arguments_parse_and_use_a_cursor() {
+        let cli = Cli::try_parse_from([
+            "kleinanzeigen",
+            "gallery",
+            "--pages",
+            "2",
+            "--limit",
+            "5",
+            "--cursor",
+            "3",
+        ])
+        .expect("valid gallery");
+        let Command::Gallery(args) = cli.command else {
+            panic!("expected gallery command");
+        };
+        assert_eq!(args.pages, 2);
+        assert_eq!(args.limit, 5);
+        assert_eq!(args.start_page().expect("page"), 3);
+    }
+
+    #[test]
+    fn stats_batch_requires_one_or_more_ids() {
+        let cli = Cli::try_parse_from(["kleinanzeigen", "stats-batch", "1", "2"])
+            .expect("valid stats batch");
+        let Command::StatsBatch(args) = cli.command else {
+            panic!("expected stats batch command");
+        };
+        assert_eq!(args.ids, ["1", "2"]);
+        assert!(Cli::try_parse_from(["kleinanzeigen", "stats-batch"]).is_err());
     }
 
     #[test]

@@ -9,10 +9,10 @@ use crate::domain::{Listing, ListingId, Price, SearchQuery};
 use crate::error::Result;
 use crate::output::{Format, write_json};
 use crate::provider::mobile_api::{AppApiSettings, MobileApiProvider};
-use crate::provider::{ListingList, Provider};
+use crate::provider::{ListingList, Provider, SearchPage};
 
-pub use discovery::{gallery, profile, seller_other, similar, stats};
-pub use reference::{categories, locations, search_metadata};
+pub use discovery::{gallery, images, profile, seller_other, similar, stats, stats_batch};
+pub use reference::{categories, flag_reasons, location, locations, search_metadata};
 pub use watch::watch;
 
 /// Searches listings and writes the result.
@@ -28,33 +28,37 @@ async fn search_query(query: &SearchQuery, format: Format) -> Result<()> {
     match format {
         Format::Json => write_json(&page),
         Format::Human => {
-            let pages = page.pages_fetched.max(1);
-            if pages == 1 {
-                println!(
-                    "{} result(s), page {} ({} per page)",
-                    page.total, page.page, page.size
-                );
-            } else {
-                let last_page = page.page.saturating_add(pages - 1);
-                println!(
-                    "{} result(s), pages {}-{} ({} per page, {} fetched)",
-                    page.total, page.page, last_page, page.size, pages
-                );
-            }
-            for listing in &page.items {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    listing.id,
-                    human_price(listing),
-                    human_location(listing),
-                    listing.title
-                );
-            }
-            if let Some(cursor) = &page.next_cursor {
-                println!("next: --cursor {cursor}");
-            }
+            print_search_page(&page);
             Ok(())
         }
+    }
+}
+
+pub(crate) fn print_search_page(page: &SearchPage) {
+    let pages = page.pages_fetched.max(1);
+    if pages == 1 {
+        println!(
+            "{} result(s), page {} ({} per page)",
+            page.total, page.page, page.size
+        );
+    } else {
+        let last_page = page.page.saturating_add(pages - 1);
+        println!(
+            "{} result(s), pages {}-{} ({} per page, {} fetched)",
+            page.total, page.page, last_page, page.size, pages
+        );
+    }
+    for listing in &page.items {
+        println!(
+            "{}\t{}\t{}\t{}",
+            listing.id,
+            human_price(listing),
+            human_location(listing),
+            listing.title
+        );
+    }
+    if let Some(cursor) = &page.next_cursor {
+        println!("next: --cursor {cursor}");
     }
 }
 

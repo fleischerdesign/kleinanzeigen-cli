@@ -90,14 +90,18 @@ kleinanzeigen get 1234567890 --json
 # Public reference data and discovery.
 kleinanzeigen categories "Fahrräder" --json
 kleinanzeigen locations Berlin --json
+kleinanzeigen location 3331 --json
 kleinanzeigen search-metadata "Fahrräder & Zubehör" --json
 kleinanzeigen similar 1234567890 --json
 kleinanzeigen seller-other 1234567890 --json
-kleinanzeigen gallery --json
+kleinanzeigen gallery --pages 2 --limit 20 --json
+kleinanzeigen images 1234567890 --json
+kleinanzeigen flag-reasons --json
 
 # Public seller and counter data.
 kleinanzeigen profile 123456 --json
 kleinanzeigen stats 1234567890 --json
+kleinanzeigen stats-batch 1234567890 1234567891 --json
 
 # Poll new listings as one JSON event per line.
 kleinanzeigen watch "fendt bianco" --interval 15m --json
@@ -112,6 +116,7 @@ Search filters:
 - `--location-id <ID>` — skip the lookup with a numeric location id.
 - `--radius <KM>`, `--min-price <EUROS>`, `--max-price <EUROS>`
 - `--ad-type <offered|wanted>` — default `offered`.
+- `--poster-type <private|commercial>` — verified provider filter.
 - `--picture-required`, `--buy-now-only`, `--include-top-ads`
 - `--exclude <TERM>` — repeatable, filters title and description after the fetch.
 - `--min-rooms <N>`, `--max-rooms <N>`, `--min-size <M2>`, `--max-size <M2>`
@@ -125,6 +130,12 @@ sequentially with a short delay and deduplicate listings by id.
 `--include-top-ads` may add paid top ads beyond the configured page size.
 Client-side filters affect `items`, not the provider's `total`.
 
+The provider echoes `priceType` and `adStatus` but does not use them as filters;
+the CLI deliberately does not expose them. The same applies to arbitrary dynamic
+`attr` queries: `search-metadata` reports the filters, but their query encoding
+is not verified. `similar` and `seller-other` are fixed lists; only the public
+gallery paginates.
+
 `watch` uses the same filters, polls one page per interval, prints a snapshot on
 the first poll and only unseen listings afterwards, and keeps deduplication in
 memory. The interval is at least `30s`; the default is `15m`.
@@ -135,10 +146,14 @@ Planned, not implemented: `login`, own ads, drafts and publishing, messages,
 MCP.
 
 The public read surface covers search, detail, reference data, discovery,
-metadata, public counters and `watch`. Commercial imprint, reporting/flags,
-manufacturer catalogue and loyalty badges are intentionally not part of the
-CLI. `search-metadata` reports category filters; arbitrary dynamic `attr`
-queries are not sent because their encoding is unverified.
+metadata, public counters and `watch`. `similar` and `seller-other` are fixed
+lists; only the gallery paginates. `priceType` and `adStatus` are echoed by the
+provider but not applied, so they are not exposed as filters. Commercial
+imprint, ad-specific reporting, manufacturer catalogue and loyalty badges are
+intentionally not part of the CLI; the public `flag-reasons` list is exposed.
+`search-metadata` reports category filters;
+arbitrary dynamic `attr` queries are not sent because their encoding is
+unverified.
 
 ## JSON contract
 
@@ -232,6 +247,26 @@ Public counters:
 {"schema_version":1,"data":{"id":"1234567890","views":7,"watchlist":2}}
 ```
 
+`stats-batch` returns an array of the same objects in `data`. `images` returns
+all public variants of one listing; `gallery` uses the same page shape as
+`search`:
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "id": "1234567890",
+    "variants": [
+      { "rel": "large", "url": "https://img.example.invalid/large.jpg" },
+      { "rel": "XXL", "url": "https://img.example.invalid/xxl.jpg" }
+    ]
+  }
+}
+```
+
+`location` returns a public location detail; `flag-reasons` returns an array of
+public reporting reasons.
+
 `watch` emits newline-delimited JSON, one object per line:
 
 ```json
@@ -279,6 +314,7 @@ Exit codes:
 - Client-side filters (`--exclude`, rooms, size) affect `items`; `total` remains the provider's total.
 - `posted_at` is an RFC 3339 string or `null`. `rooms` and `size_m2` are numbers or `null`.
 - `seller_id` is the public numeric seller identifier; use it with `profile`.
+- `gallery` uses the search-page shape; `images`, `stats-batch`, `location` and `flag-reasons` use their dedicated objects or arrays in `data`.
 - `retry_after_seconds` appears only when the provider sent a numeric `Retry-After` header.
 
 ## Supported platforms
@@ -301,6 +337,7 @@ src/
 ├── error.rs       typed errors and stable exit codes
 ├── output.rs      JSON, NDJSON and human-readable output
 ├── domain/
+│   ├── image.rs   public image variants
 │   ├── listing.rs listing ids, prices, locations, categories, listings
 │   ├── profile.rs public seller profiles and badges
 │   ├── query.rs   search requests and sort order
@@ -335,19 +372,22 @@ output contract, not a serialization of internal structs.
 - No telemetry, no cache and no state beyond the process. `watch` keeps its seen
   set in memory only; a restart begins with a new snapshot.
 - Listing output includes city, postal code, the public seller id and public
-  image URLs. Exact coordinates, contact names and phone numbers are not emitted
-  by search or get. The explicit `profile` command returns the public seller
-  profile, including the public contact name, member-since date, badges and
-  counters.
+  image URLs. Exact ad coordinates, contact names and phone numbers are not
+  emitted by search or get. The explicit `profile` command returns the public
+  seller profile, including the public contact name, member-since date, badges
+  and counters. The explicit `location` command returns the public location
+  tree, including approximate location coordinates, not an ad's exact position.
 - Logs never contain `Authorization`, the app install id, tokens or response
   bodies. JSON mode suppresses logs entirely.
 - Search: one request per page, at most 10 pages, plus at most one category and
   one location lookup; pages are fetched sequentially with a 500 ms pause.
+- `gallery`: one request per page, at most 10 pages, 500 ms pause.
 - `watch`: one search request per poll, with name lookups when needed, at an
   interval of at least 30 seconds; one page per poll.
-- `stats` makes two requests; `categories`, `locations`, `similar`,
-  `seller-other`, `gallery`, `profile` and `search-metadata` make one request
-  each, plus a category lookup for a metadata name.
+- `stats` makes two requests; `stats-batch` makes one watchlist request plus one
+  view request per id. `categories`, `locations`, `location`, `similar`,
+  `seller-other`, `profile`, `images`, `flag-reasons` and `search-metadata` make
+  one request each, plus a category lookup for a metadata name.
 - No automatic retries, a 25-second timeout, a maximum page size of 50 and an
   8 MiB response cap. A numeric `Retry-After` header is surfaced as
   `retry_after_seconds`.

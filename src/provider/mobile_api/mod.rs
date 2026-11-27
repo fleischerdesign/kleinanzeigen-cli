@@ -24,7 +24,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::domain::{
-    AdStats, CategoryRef, Listing, ListingId, LocationRef, SearchFilter, SearchQuery, SellerProfile,
+    AdStats, CategoryRef, FlagReason, ImageSet, Listing, ListingId, LocationDetail, LocationRef,
+    SearchFilter, SearchQuery, SellerProfile,
 };
 use crate::error::{Error, Result};
 use crate::provider::{ListingList, Provider, SearchPage};
@@ -42,8 +43,10 @@ const CATEGORIES_PATH: &str = "api/categories.json";
 const LOCATIONS_PATH: &str = "api/locations.json";
 const METADATA_PATH: &str = "api/ads/search-metadata/{id}.json";
 const PROFILE_PATH: &str = "api/users/public/{id}/profile.json";
+const LOCATION_PATH: &str = "api/locations/{id}.json";
 const VIEWS_PATH: &str = "api/v2/counters/ads/vip/{id}";
 const WATCHLIST_COUNTERS_PATH: &str = "api/v2/counters/ads/watchlist";
+const FLAG_REASONS_PATH: &str = "api/v2/flags/ads/reasons";
 const ACCEPT_LANGUAGE_VALUE: &str = "de-DE";
 const PAGE_DELAY: Duration = Duration::from_millis(500);
 
@@ -258,11 +261,6 @@ impl MobileApiProvider {
         self.listing_list(&path, "seller other ads").await
     }
 
-    /// Fetches the public homepage gallery.
-    pub async fn gallery(&self) -> Result<ListingList> {
-        self.listing_list(GALLERY_PATH, "gallery").await
-    }
-
     /// Fetches one public seller profile.
     pub async fn profile(&self, seller_id: &str) -> Result<SellerProfile> {
         if seller_id.is_empty()
@@ -284,28 +282,155 @@ impl MobileApiProvider {
 
     /// Fetches public view and watchlist counters for one listing.
     pub async fn stats(&self, id: &ListingId) -> Result<AdStats> {
-        let views_path = VIEWS_PATH.replace("{id}", id.as_str());
-        let views_url = self.endpoint(&views_path)?;
-        let views_body = self.get(views_url, "view counter").await?;
-        let views_response: dto::ViewsResponse = serde_json::from_slice(&views_body)
-            .map_err(|error| Error::Format(format!("could not parse view counter: {error}")))?;
-        let views = convert::views(views_response)?;
+        self.stats_batch(std::slice::from_ref(id))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Internal("stats batch returned no entry".to_owned()))
+    }
 
+    /// Fetches public counters for up to 20 listings.
+    pub async fn stats_batch(&self, ids: &[ListingId]) -> Result<Vec<AdStats>> {
+        if ids.is_empty() || ids.len() > 20 {
+            return Err(Error::Input(
+                "stats batch needs between 1 and 20 ids".to_owned(),
+            ));
+        }
+
+        let ids_param = ids
+            .iter()
+            .map(ListingId::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
         let mut watchlist_url = self.endpoint(WATCHLIST_COUNTERS_PATH)?;
         watchlist_url
             .query_pairs_mut()
-            .append_pair("adIds", id.as_str());
+            .append_pair("adIds", &ids_param);
         let watchlist_body = self.get(watchlist_url, "watchlist counter").await?;
         let watchlist_response: dto::WatchlistCountersResponse =
             serde_json::from_slice(&watchlist_body).map_err(|error| {
                 Error::Format(format!("could not parse watchlist counter: {error}"))
             })?;
-        let watchlist = convert::watchlist_count(watchlist_response, id);
+        let watchlist = convert::watchlist_counts(watchlist_response);
 
-        Ok(AdStats {
-            id: id.clone(),
-            views,
-            watchlist,
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let views_path = VIEWS_PATH.replace("{id}", id.as_str());
+            let views_url = self.endpoint(&views_path)?;
+            let views_body = self.get(views_url, "view counter").await?;
+            let views_response: dto::ViewsResponse = serde_json::from_slice(&views_body)
+                .map_err(|error| Error::Format(format!("could not parse view counter: {error}")))?;
+            let views = convert::views(views_response)?;
+            out.push(AdStats {
+                id: id.clone(),
+                views,
+                watchlist: watchlist.get(id.as_str()).copied(),
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Fetches all public image variants of one listing.
+    pub async fn images(&self, id: &ListingId) -> Result<ImageSet> {
+        let path = DETAIL_PATH.replace("{id}", id.as_str());
+        let url = self.endpoint(&path)?;
+        let body = self.get(url, &format!("images {id}")).await?;
+        let response: dto::DetailResponse = serde_json::from_slice(&body)
+            .map_err(|error| Error::Format(format!("could not parse images: {error}")))?;
+        convert::image_set(response)
+    }
+
+    /// Fetches one public location detail.
+    pub async fn location(&self, id: &str) -> Result<LocationDetail> {
+        if id.is_empty() || !id.chars().all(|character| character.is_ascii_digit()) {
+            return Err(Error::Input(
+                "location id must be a non-empty numeric string".to_owned(),
+            ));
+        }
+        let path = LOCATION_PATH.replace("{id}", id);
+        let url = self.endpoint(&path)?;
+        let body = self.get(url, "location detail").await?;
+        let response: dto::LocationDetailResponse = serde_json::from_slice(&body)
+            .map_err(|error| Error::Format(format!("could not parse location: {error}")))?;
+        convert::location_detail(response)
+    }
+
+    /// Fetches the public reporting reasons.
+    pub async fn flag_reasons(&self) -> Result<Vec<FlagReason>> {
+        let url = self.endpoint(FLAG_REASONS_PATH)?;
+        let body = self.get(url, "flag reasons").await?;
+        let response: Vec<dto::FlagReason> = serde_json::from_slice(&body)
+            .map_err(|error| Error::Format(format!("could not parse flag reasons: {error}")))?;
+        Ok(convert::flag_reasons(response))
+    }
+
+    /// Fetches a paginated public homepage gallery.
+    pub async fn gallery(&self, start_page: u32, pages: u32, size: u32) -> Result<SearchPage> {
+        if pages == 0 || pages > 10 {
+            return Err(Error::Input("pages must be between 1 and 10".to_owned()));
+        }
+        if size == 0 || size > 50 {
+            return Err(Error::Input("limit must be between 1 and 50".to_owned()));
+        }
+
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        let mut total = 0;
+        let mut next_cursor = None;
+        let mut pages_fetched = 0;
+
+        for offset in 0..pages {
+            let page = start_page
+                .checked_add(offset)
+                .ok_or_else(|| Error::Input("page range is too large".to_owned()))?;
+            let mut url = self.endpoint(GALLERY_PATH)?;
+            {
+                let mut pairs = url.query_pairs_mut();
+                pairs.append_pair("page", &page.to_string());
+                pairs.append_pair("size", &size.to_string());
+            }
+            let body = self.get(url, "gallery").await?;
+            let response: dto::SearchResponse = serde_json::from_slice(&body)
+                .map_err(|error| Error::Format(format!("could not parse gallery: {error}")))?;
+            let page_result = convert::search_page(response, page, size)?;
+            let SearchPage {
+                items: page_items,
+                total: page_total,
+                next_cursor: page_next,
+                ..
+            } = page_result;
+
+            if pages_fetched == 0 {
+                total = page_total;
+            }
+            pages_fetched += 1;
+            let empty = page_items.is_empty();
+            for item in page_items {
+                if seen.insert(item.id.clone()) {
+                    items.push(item);
+                }
+            }
+            if empty {
+                next_cursor = None;
+                break;
+            }
+            next_cursor = page_next;
+            if next_cursor.is_none() {
+                break;
+            }
+            if offset + 1 < pages {
+                tokio::time::sleep(PAGE_DELAY).await;
+            }
+        }
+
+        Ok(SearchPage {
+            items,
+            total,
+            page: start_page,
+            size,
+            pages_fetched,
+            next_cursor,
         })
     }
 
@@ -341,6 +466,9 @@ impl MobileApiProvider {
             }
             if let Some(location_id) = location_id {
                 pairs.append_pair("locationId", location_id);
+            }
+            if let Some(poster_type) = query.poster_type {
+                pairs.append_pair("posterType", poster_type.as_api_value());
             }
             if let Some(radius_km) = query.radius_km {
                 pairs.append_pair("distance", &radius_km.to_string());
@@ -517,7 +645,7 @@ mod tests {
     use reqwest::StatusCode;
 
     use super::*;
-    use crate::domain::{AdType, SearchQuery, SearchSort};
+    use crate::domain::{AdType, PosterType, SearchQuery, SearchSort};
 
     const SEARCH_FIXTURE: &str = include_str!("../../../tests/fixtures/search.json");
     const DETAIL_FIXTURE: &str = include_str!("../../../tests/fixtures/detail.json");
@@ -696,6 +824,7 @@ mod tests {
         query.min_price_cents = Some(12_50);
         query.max_price_cents = Some(80_00);
         query.ad_type = AdType::Wanted;
+        query.poster_type = Some(PosterType::Private);
         query.picture_required = true;
         query.buy_now_only = true;
         query.include_top_ads = true;
@@ -761,6 +890,7 @@ mod tests {
         assert_eq!(pairs.get("adType").map(String::as_str), Some("WANTED"));
         assert_eq!(pairs.get("categoryId").map(String::as_str), Some("217"));
         assert_eq!(pairs.get("locationId").map(String::as_str), Some("4910"));
+        assert_eq!(pairs.get("posterType").map(String::as_str), Some("PRIVATE"));
         assert_eq!(pairs.get("distance").map(String::as_str), Some("10"));
         assert_eq!(pairs.get("minPrice").map(String::as_str), Some("12.50"));
         assert_eq!(pairs.get("maxPrice").map(String::as_str), Some("80"));
@@ -840,6 +970,33 @@ mod tests {
             .map(|request| query_map(request).get("page").cloned().unwrap_or_default())
             .collect::<Vec<_>>();
         assert_eq!(pages, ["1", "2"]);
+    }
+
+    #[tokio::test]
+    async fn gallery_pages_are_merged_and_deduplicated() {
+        let transport = SequenceTransport::new(&[SEARCH_FIXTURE, SEARCH_FIXTURE]);
+        let provider =
+            MobileApiProvider::with_transport(settings(), transport.clone()).expect("provider");
+
+        let page = provider.gallery(1, 2, 2).await.expect("gallery");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.page, 1);
+        assert_eq!(page.size, 2);
+        assert_eq!(page.pages_fetched, 2);
+        assert_eq!(page.next_cursor.as_deref(), Some("3"));
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].url.path(), "/api/ads/hp-gallery.json");
+        assert_eq!(
+            query_map(&requests[0]).get("page").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            query_map(&requests[1]).get("page").map(String::as_str),
+            Some("2")
+        );
     }
 
     #[tokio::test]

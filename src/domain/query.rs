@@ -51,6 +51,26 @@ impl AdType {
     }
 }
 
+/// The public poster type filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PosterType {
+    /// Private sellers.
+    Private,
+    /// Commercial sellers.
+    Commercial,
+}
+
+impl PosterType {
+    /// Returns the value understood by the mobile API.
+    pub const fn as_api_value(self) -> &'static str {
+        match self {
+            Self::Private => "PRIVATE",
+            Self::Commercial => "COMMERCIAL",
+        }
+    }
+}
+
 /// A search request.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchQuery {
@@ -70,6 +90,8 @@ pub struct SearchQuery {
     pub max_price_cents: Option<i64>,
     /// Search for offered or wanted ads.
     pub ad_type: AdType,
+    /// Restrict to private or commercial sellers.
+    pub poster_type: Option<PosterType>,
     /// Only return ads with at least one picture.
     pub picture_required: bool,
     /// Only return ads with a buy-now option.
@@ -234,6 +256,7 @@ impl Default for SearchQuery {
             min_price_cents: None,
             max_price_cents: None,
             ad_type: AdType::Offered,
+            poster_type: None,
             picture_required: false,
             buy_now_only: false,
             include_top_ads: false,
@@ -260,6 +283,7 @@ mod tests {
         assert_eq!(query.limit, 25);
         assert_eq!(query.pages, 1);
         assert_eq!(query.ad_type, AdType::Offered);
+        assert!(query.poster_type.is_none());
         assert!(!query.picture_required);
         assert!(!query.buy_now_only);
         assert!(!query.include_top_ads);
@@ -346,5 +370,7 @@ mod tests {
         assert_eq!(SearchSort::PriceAscending.as_api_value(), "PRICE_ASCENDING");
         assert_eq!(AdType::Offered.as_api_value(), "OFFERED");
         assert_eq!(AdType::Wanted.as_api_value(), "WANTED");
+        assert_eq!(PosterType::Private.as_api_value(), "PRIVATE");
+        assert_eq!(PosterType::Commercial.as_api_value(), "COMMERCIAL");
     }
 }

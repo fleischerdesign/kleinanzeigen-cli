@@ -1,6 +1,7 @@
 //! Public reference and metadata commands.
 
-use crate::cli::{CategoriesArgs, LocationsArgs, SearchMetadataArgs};
+use crate::cli::{CategoriesArgs, LocationArgs, LocationsArgs, SearchMetadataArgs};
+use crate::domain::{FlagReason, LocationDetail, LocationRef};
 use crate::error::{Error, Result};
 use crate::output::{Format, write_json};
 
@@ -73,7 +74,7 @@ fn output_categories(entries: &[crate::domain::CategoryRef], format: Format) -> 
     }
 }
 
-fn output_locations(entries: &[crate::domain::LocationRef], format: Format) -> Result<()> {
+fn output_locations(entries: &[LocationRef], format: Format) -> Result<()> {
     match format {
         Format::Json => write_json(&entries),
         Format::Human => {
@@ -82,5 +83,64 @@ fn output_locations(entries: &[crate::domain::LocationRef], format: Format) -> R
             }
             Ok(())
         }
+    }
+}
+
+/// Fetches one public location detail.
+pub async fn location(args: LocationArgs, format: Format) -> Result<()> {
+    let provider = super::provider()?;
+    let location = provider.location(&args.id).await?;
+    match format {
+        Format::Json => write_json(&location),
+        Format::Human => {
+            print_location(&location);
+            Ok(())
+        }
+    }
+}
+
+/// Lists public reporting reasons.
+pub async fn flag_reasons(format: Format) -> Result<()> {
+    let provider = super::provider()?;
+    let reasons = provider.flag_reasons().await?;
+    match format {
+        Format::Json => write_json(&reasons),
+        Format::Human => {
+            for reason in &reasons {
+                print_flag_reason(reason, 0);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_location(location: &LocationDetail) {
+    println!("{}", location.label);
+    println!("id: {}", location.id);
+    if let Some(parent_id) = &location.parent_id {
+        println!("parent: {parent_id}");
+    }
+    if let Some(child_count) = location.child_count {
+        println!("children: {child_count}");
+    }
+    if let Some(latitude) = location.latitude {
+        println!("latitude: {latitude}");
+    }
+    if let Some(longitude) = location.longitude {
+        println!("longitude: {longitude}");
+    }
+    if let Some(radius) = location.radius_km {
+        println!("radius_km: {radius}");
+    }
+    for child in &location.children {
+        println!("child: {}\t{}", child.id, child.label);
+    }
+}
+
+fn print_flag_reason(reason: &FlagReason, depth: usize) {
+    let indent = "  ".repeat(depth);
+    println!("{indent}{}\t{}", reason.id, reason.title);
+    for child in &reason.subreasons {
+        print_flag_reason(child, depth + 1);
     }
 }

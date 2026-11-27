@@ -1,20 +1,22 @@
 //! Conversion from provider DTOs to validated domain values.
 
+use std::collections::{HashMap, HashSet};
+
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::domain::{
-    Attribute, Category, FilterValue, Listing, ListingId, Location, Price, SearchFilter,
-    SellerBadge, SellerProfile,
+    Attribute, Category, FilterValue, FlagReason, ImageSet, ImageVariant, Listing, ListingId,
+    Location, LocationDetail, LocationRef, Price, SearchFilter, SellerBadge, SellerProfile,
 };
 use crate::error::{Error, Result};
 use crate::provider::{ListingList, SearchPage};
 
 use super::dto::{
-    Ad, Attribute as AttributeDto, DetailResponse, FlexibleString, Link, OneOrMany,
-    ProfileResponse, SearchMetadataResponse, SearchResponse, Value, ViewsResponse,
-    WatchlistCountersResponse,
+    Ad, Attribute as AttributeDto, DetailResponse, FlagReason as FlagReasonDto, FlexibleString,
+    Link, LocationDetailResponse, LocationNode, OneOrMany, ProfileResponse, SearchMetadataResponse,
+    SearchResponse, Value, ViewsResponse, WatchlistCountersResponse,
 };
 use super::html;
 
@@ -51,6 +53,35 @@ pub(crate) fn search_page(response: SearchResponse, page: u32, size: u32) -> Res
         pages_fetched: 1,
         next_cursor,
     })
+}
+
+/// Converts a detail response into all public image variants.
+pub(crate) fn image_set(response: DetailResponse) -> Result<ImageSet> {
+    let ad = response.ad.value;
+    let id_value = ad
+        .id
+        .ok_or_else(|| invalid("listing has no id"))?
+        .into_string();
+    let listing_id = ListingId::new(id_value.as_str()).map_err(|error| {
+        Error::Format(format!("provider response for listing {id_value}: {error}"))
+    })?;
+    Ok(ImageSet {
+        id: listing_id,
+        variants: image_variants(ad.pictures)?,
+    })
+}
+
+/// Converts a location-detail response.
+pub(crate) fn location_detail(response: LocationDetailResponse) -> Result<LocationDetail> {
+    location_detail_from_node(response.location.value)
+}
+
+/// Converts public flag reasons.
+pub(crate) fn flag_reasons(reasons: Vec<FlagReasonDto>) -> Vec<FlagReason> {
+    reasons
+        .into_iter()
+        .filter_map(flag_reason_from_dto)
+        .collect()
 }
 
 /// Converts a discovery response into a bounded listing list.
@@ -257,6 +288,153 @@ fn images_from_dto(pictures: Option<super::dto::Pictures>) -> Result<Vec<Url>> {
     Ok(images)
 }
 
+fn image_variants(pictures: Option<super::dto::Pictures>) -> Result<Vec<ImageVariant>> {
+    let pictures = pictures
+        .and_then(|pictures| pictures.picture)
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default();
+    let mut variants = Vec::new();
+    let mut seen = HashSet::new();
+
+    for picture in pictures {
+        let links = picture.link.map(OneOrMany::into_vec).unwrap_or_default();
+        for link in links {
+            let Some(rel) = link.rel.filter(|rel| !rel.is_empty()) else {
+                continue;
+            };
+            let Some(href) = link.href.filter(|href| !href.is_empty()) else {
+                continue;
+            };
+            let url = Url::parse(&href)
+                .map_err(|error| invalid(format!("invalid image URL: {error}")))?;
+            if seen.insert(url.clone()) {
+                variants.push(ImageVariant { rel, url });
+            }
+        }
+    }
+
+    Ok(variants)
+}
+
+fn location_detail_from_node(node: LocationNode) -> Result<LocationDetail> {
+    let LocationNode {
+        id,
+        id_name,
+        localized_name,
+        location,
+        latitude,
+        longitude,
+        radius,
+        parent_id,
+        children_count,
+    } = node;
+    let id = id
+        .ok_or_else(|| invalid("location has no id"))?
+        .into_string();
+    if id.is_empty() {
+        return Err(invalid("location has an empty id"));
+    }
+
+    let short_name = id_name
+        .and_then(|value| value.value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let localized_name = localized_name
+        .and_then(|value| value.value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let name = short_name
+        .or_else(|| localized_name.clone())
+        .unwrap_or_else(|| id.clone());
+    let label = localized_name.unwrap_or_else(|| name.clone());
+    let parent_id = parent_id
+        .and_then(|value| value.value)
+        .map(|value| value.to_plain_string())
+        .filter(|value| !value.is_empty());
+    let children = location
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|child| location_ref_from_node(*child))
+        .collect::<Vec<_>>();
+    let child_count = children_count
+        .and_then(|value| value.value)
+        .and_then(|value| value.to_plain_string().parse::<u64>().ok())
+        .or(Some(children.len() as u64));
+
+    Ok(LocationDetail {
+        id: id.clone(),
+        name,
+        label,
+        parent_id,
+        child_count,
+        latitude: optional_number(latitude, "latitude", &id)?,
+        longitude: optional_number(longitude, "longitude", &id)?,
+        radius_km: optional_number(radius, "radius", &id)?,
+        children,
+    })
+}
+
+fn location_ref_from_node(node: LocationNode) -> Option<LocationRef> {
+    let id = node.id?.into_string();
+    if id.is_empty() {
+        return None;
+    }
+    let short_name = node
+        .id_name
+        .and_then(|value| value.value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let localized_name = node
+        .localized_name
+        .and_then(|value| value.value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let name = short_name
+        .or_else(|| localized_name.clone())
+        .unwrap_or_else(|| id.clone());
+    let label = localized_name.unwrap_or_else(|| name.clone());
+    Some(LocationRef { id, name, label })
+}
+
+fn optional_number(
+    value: Option<Value<FlexibleString>>,
+    field: &str,
+    id: &str,
+) -> Result<Option<f64>> {
+    let Some(value) = value.and_then(|value| value.value) else {
+        return Ok(None);
+    };
+    parse_number(&value.to_plain_string())
+        .map(Some)
+        .ok_or_else(|| invalid(format!("location {id} has an invalid {field}")))
+}
+
+fn flag_reason_from_dto(reason: FlagReasonDto) -> Option<FlagReason> {
+    let id = reason.id?.into_string();
+    let title = reason.title?.into_string();
+    if id.is_empty() || title.is_empty() {
+        return None;
+    }
+    let subreasons = reason
+        .subreasons
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|reason| flag_reason_from_dto(*reason))
+        .collect();
+
+    Some(FlagReason {
+        id,
+        title,
+        submittable: reason.submittable.is_some_and(|value| value.is_true()),
+        allow_anonymous: reason.allow_anonymous.is_some_and(|value| value.is_true()),
+        allow_guest: reason.allow_guest.is_some_and(|value| value.is_true()),
+        text_required: reason.text_required.is_some_and(|value| value.is_true()),
+        subreasons,
+    })
+}
+
 fn best_picture_link(links: &[Link]) -> Option<String> {
     const PREFERRED: [&str; 4] = ["large", "XXL", "teaser", "thumbnail"];
 
@@ -405,20 +583,19 @@ pub(crate) fn views(response: ViewsResponse) -> Result<u64> {
         .ok_or_else(|| invalid("view counter has no value"))
 }
 
-/// Finds one listing's watchlist count in a counter response.
-pub(crate) fn watchlist_count(response: WatchlistCountersResponse, id: &ListingId) -> Option<u64> {
+/// Converts watchlist counters into a map keyed by ad id.
+pub(crate) fn watchlist_counts(response: WatchlistCountersResponse) -> HashMap<String, u64> {
     response
         .counters
         .map(OneOrMany::into_vec)
         .unwrap_or_default()
         .into_iter()
-        .find(|counter| {
-            counter
-                .ad_id
-                .as_ref()
-                .is_some_and(|counter_id| counter_id.to_plain_string() == id.as_str())
+        .filter_map(|counter| {
+            let id = counter.ad_id?.to_plain_string();
+            let value = counter.value?;
+            Some((id, value))
         })
-        .and_then(|counter| counter.value)
+        .collect()
 }
 
 fn rooms_and_size(attributes: Option<&super::dto::Attributes>) -> (Option<f64>, Option<f64>) {
@@ -603,6 +780,75 @@ mod tests {
     }
 
     #[test]
+    fn converts_all_image_variants() {
+        let response: DetailResponse =
+            serde_json::from_str(include_str!("../../../tests/fixtures/detail.json"))
+                .expect("valid detail");
+        let images = image_set(response).expect("images");
+        assert_eq!(images.id.as_str(), "1234567890");
+        assert_eq!(images.variants.len(), 2);
+        assert_eq!(images.variants[0].rel, "thumbnail");
+        assert_eq!(images.variants[1].rel, "large");
+    }
+
+    #[test]
+    fn converts_a_synthetic_location_detail() {
+        let json = r#"{
+            "{http://www.ebayclassifiedsgroup.com/schema/location/v1}location": {
+                "value": {
+                    "id": "3331",
+                    "id-name": { "value": "Teststadt" },
+                    "localized-name": { "value": "Teststadt (Testland)" },
+                    "parent-id": { "value": "0" },
+                    "children-count": { "value": "1" },
+                    "latitude": { "value": "52.5" },
+                    "longitude": { "value": "13.4" },
+                    "radius": { "value": "5.0" },
+                    "location": [
+                        {
+                            "id": "3332",
+                            "id-name": { "value": "Testdorf" },
+                            "localized-name": { "value": "Testdorf" }
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let response: LocationDetailResponse = serde_json::from_str(json).expect("valid location");
+        let location = location_detail(response).expect("location detail");
+        assert_eq!(location.id, "3331");
+        assert_eq!(location.label, "Teststadt (Testland)");
+        assert_eq!(location.parent_id.as_deref(), Some("0"));
+        assert_eq!(location.child_count, Some(1));
+        assert_eq!(location.latitude, Some(52.5));
+        assert_eq!(location.children.len(), 1);
+    }
+
+    #[test]
+    fn converts_nested_flag_reasons() {
+        let json = r#"[
+            {
+                "id": "1",
+                "title": "Synthetic reason",
+                "submittable": true,
+                "allowAnonymous": false,
+                "allowGuest": false,
+                "textRequired": true,
+                "subreasons": [
+                    { "id": "1.1", "title": "Synthetic subreason", "submittable": true }
+                ]
+            }
+        ]"#;
+        let response: Vec<super::super::dto::FlagReason> =
+            serde_json::from_str(json).expect("valid reasons");
+        let reasons = flag_reasons(response);
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].submittable);
+        assert!(reasons[0].text_required);
+        assert_eq!(reasons[0].subreasons.len(), 1);
+    }
+
+    #[test]
     fn converts_a_synthetic_profile() {
         let json = r#"{
             "id": "42",
@@ -669,8 +915,8 @@ mod tests {
 
         let counters: WatchlistCountersResponse =
             serde_json::from_str(r#"{"counters":[{"adId":"123","value":2}]}"#).expect("counters");
-        let id = ListingId::new("123").expect("id");
-        assert_eq!(watchlist_count(counters, &id), Some(2));
+        let counts = watchlist_counts(counters);
+        assert_eq!(counts.get("123"), Some(&2));
     }
 
     #[test]
