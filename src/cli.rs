@@ -290,7 +290,12 @@ pub struct WatchArgs {
     pub saved: Option<String>,
 
     /// Poll interval: 30s, 15m or 1h.
-    #[arg(long, default_value = "15m", value_name = "DURATION")]
+    #[arg(
+        long,
+        default_value = "15m",
+        value_name = "DURATION",
+        conflicts_with = "saved"
+    )]
     pub interval: String,
 
     /// Stop after this many polls. The default is unlimited.
@@ -929,5 +934,23 @@ mod tests {
         assert_eq!(query.sort, Some(SearchSort::DateDescending));
         assert_eq!(args.poll_limit(), 0);
         assert!(!args.uses_state());
+    }
+
+    #[test]
+    fn watch_saved_search_rejects_an_explicit_interval() {
+        assert!(
+            Cli::try_parse_from([
+                "kleinanzeigen",
+                "watch",
+                "--saved",
+                "camper",
+                "--interval",
+                "30s",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["kleinanzeigen", "watch", "--saved", "camper", "--once"]).is_ok()
+        );
     }
 }
