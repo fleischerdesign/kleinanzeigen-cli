@@ -216,6 +216,60 @@ pub(crate) struct AttributeValue {
     pub(crate) localized_label: Option<String>,
 }
 
+/// Category reference response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CategoriesResponse {
+    #[serde(rename = "{http://www.ebayclassifiedsgroup.com/schema/category/v1}categories")]
+    pub(crate) categories: CategoryEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CategoryEnvelope {
+    pub(crate) value: CategoryRoot,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CategoryRoot {
+    pub(crate) category: Option<OneOrMany<CategoryNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CategoryNode {
+    pub(crate) id: Option<FlexibleString>,
+    #[serde(rename = "id-name")]
+    pub(crate) id_name: Option<Value<String>>,
+    #[serde(rename = "localized-name")]
+    pub(crate) localized_name: Option<Value<String>>,
+    pub(crate) category: Option<OneOrMany<Box<CategoryNode>>>,
+}
+
+/// Location reference response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationsResponse {
+    #[serde(rename = "{http://www.ebayclassifiedsgroup.com/schema/location/v1}locations")]
+    pub(crate) locations: LocationEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationEnvelope {
+    pub(crate) value: LocationRoot,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationRoot {
+    pub(crate) location: Option<OneOrMany<LocationNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationNode {
+    pub(crate) id: Option<FlexibleString>,
+    #[serde(rename = "id-name")]
+    pub(crate) id_name: Option<Value<String>>,
+    #[serde(rename = "localized-name")]
+    pub(crate) localized_name: Option<Value<String>>,
+    pub(crate) location: Option<OneOrMany<Box<LocationNode>>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

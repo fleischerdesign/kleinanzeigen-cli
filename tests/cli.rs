@@ -168,6 +168,7 @@ fn search_json_is_stable() {
     assert_eq!(value["data"]["total"], 2);
     assert_eq!(value["data"]["page"], 2);
     assert_eq!(value["data"]["size"], 25);
+    assert_eq!(value["data"]["pages_fetched"], 1);
     assert_eq!(value["data"]["next_cursor"], "3");
     assert_eq!(value["data"]["items"][0]["id"], "1234567890");
     assert_eq!(

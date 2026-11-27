@@ -8,10 +8,12 @@ mod config;
 mod convert;
 mod dto;
 mod html;
+mod reference;
 mod transport;
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use reqwest::Method;
@@ -31,8 +33,10 @@ use transport::{HttpRequest, HttpResponse, ReqwestTransport, Transport};
 
 const SEARCH_PATH: &str = "api/ads.json";
 const DETAIL_PATH: &str = "api/ads/{id}.json";
-const OFFERED_AD_TYPE: &str = "OFFERED";
+const CATEGORIES_PATH: &str = "api/categories.json";
+const LOCATIONS_PATH: &str = "api/locations.json";
 const ACCEPT_LANGUAGE_VALUE: &str = "de-DE";
+const PAGE_DELAY: Duration = Duration::from_millis(500);
 
 /// A read-only provider for the Kleinanzeigen mobile API.
 pub struct MobileApiProvider {
@@ -115,24 +119,108 @@ impl MobileApiProvider {
 impl Provider for MobileApiProvider {
     async fn search(&self, query: &SearchQuery) -> Result<SearchPage> {
         query.validate()?;
-        let page = query.page()?;
+        let start_page = query.page()?;
         let size = u32::try_from(query.limit)
             .map_err(|_| Error::Input("limit is too large".to_owned()))?;
+        let category_id = self.resolve_category(query.category.as_deref()).await?;
+        let location_id = match &query.location_id {
+            Some(location_id) => Some(location_id.clone()),
+            None => self.resolve_location(query.location.as_deref()).await?,
+        };
+
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        let mut total = 0;
+        let mut next_cursor = None;
+        let mut pages_fetched = 0;
+
+        for offset in 0..query.pages {
+            let page = start_page
+                .checked_add(offset)
+                .ok_or_else(|| Error::Input("page range is too large".to_owned()))?;
+            let page_result = self
+                .search_once(
+                    query,
+                    page,
+                    size,
+                    category_id.as_deref(),
+                    location_id.as_deref(),
+                )
+                .await?;
+            let SearchPage {
+                items: page_items,
+                total: page_total,
+                next_cursor: page_next,
+                ..
+            } = page_result;
+
+            if pages_fetched == 0 {
+                total = page_total;
+            }
+            pages_fetched += 1;
+            let empty = page_items.is_empty();
+            for item in page_items {
+                if seen.insert(item.id.clone()) {
+                    items.push(item);
+                }
+            }
+            if empty {
+                next_cursor = None;
+                break;
+            }
+            next_cursor = page_next;
+            if next_cursor.is_none() {
+                break;
+            }
+            if offset + 1 < query.pages {
+                tokio::time::sleep(PAGE_DELAY).await;
+            }
+        }
+
+        Ok(SearchPage {
+            items,
+            total,
+            page: start_page,
+            size,
+            pages_fetched,
+            next_cursor,
+        })
+    }
+
+    async fn listing(&self, id: &ListingId) -> Result<Listing> {
+        let path = DETAIL_PATH.replace("{id}", id.as_str());
+        let url = self.endpoint(&path)?;
+        let body = self.get(url, &format!("listing {id}")).await?;
+        let response: dto::DetailResponse = serde_json::from_slice(&body)
+            .map_err(|error| Error::Format(format!("could not parse listing response: {error}")))?;
+        convert::detail(response)
+    }
+}
+
+impl MobileApiProvider {
+    async fn search_once(
+        &self,
+        query: &SearchQuery,
+        page: u32,
+        size: u32,
+        category_id: Option<&str>,
+        location_id: Option<&str>,
+    ) -> Result<SearchPage> {
         let mut url = self.endpoint(SEARCH_PATH)?;
 
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("page", &page.to_string());
             pairs.append_pair("size", &size.to_string());
-            pairs.append_pair("adType", OFFERED_AD_TYPE);
+            pairs.append_pair("adType", query.ad_type.as_api_value());
 
             if !query.query.trim().is_empty() {
                 pairs.append_pair("q", query.query.trim());
             }
-            if let Some(category_id) = &query.category_id {
+            if let Some(category_id) = category_id {
                 pairs.append_pair("categoryId", category_id);
             }
-            if let Some(location_id) = &query.location_id {
+            if let Some(location_id) = location_id {
                 pairs.append_pair("locationId", location_id);
             }
             if let Some(radius_km) = query.radius_km {
@@ -143,6 +231,15 @@ impl Provider for MobileApiProvider {
             }
             if let Some(max_price) = query.max_price_cents {
                 pairs.append_pair("maxPrice", &euros(max_price));
+            }
+            if query.picture_required {
+                pairs.append_pair("pictureRequired", "true");
+            }
+            if query.buy_now_only {
+                pairs.append_pair("buyNowOnly", "true");
+            }
+            if query.include_top_ads {
+                pairs.append_pair("includeTopAds", "true");
             }
             if let Some(sort) = query.sort {
                 pairs.append_pair("sortType", sort.as_api_value());
@@ -155,13 +252,44 @@ impl Provider for MobileApiProvider {
         convert::search_page(response, page, size)
     }
 
-    async fn listing(&self, id: &ListingId) -> Result<Listing> {
-        let path = DETAIL_PATH.replace("{id}", id.as_str());
-        let url = self.endpoint(&path)?;
-        let body = self.get(url, &format!("listing {id}")).await?;
-        let response: dto::DetailResponse = serde_json::from_slice(&body)
-            .map_err(|error| Error::Format(format!("could not parse listing response: {error}")))?;
-        convert::detail(response)
+    async fn resolve_category(&self, value: Option<&str>) -> Result<Option<String>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if value.chars().all(|character| character.is_ascii_digit()) {
+            return Ok(Some(value.to_owned()));
+        }
+
+        let url = self.endpoint(CATEGORIES_PATH)?;
+        let body = self.get(url, "category lookup").await?;
+        let response: dto::CategoriesResponse = serde_json::from_slice(&body).map_err(|error| {
+            Error::Format(format!("could not parse category response: {error}"))
+        })?;
+        let categories = reference::categories(response.categories.value);
+        reference::resolve_category(&categories, value).map(Some)
+    }
+
+    async fn resolve_location(&self, value: Option<&str>) -> Result<Option<String>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+
+        let mut url = self.endpoint(LOCATIONS_PATH)?;
+        url.query_pairs_mut().append_pair("q", value);
+        let body = self.get(url, "location lookup").await?;
+        let response: dto::LocationsResponse = serde_json::from_slice(&body).map_err(|error| {
+            Error::Format(format!("could not parse location response: {error}"))
+        })?;
+        let locations = reference::locations(response.locations.value);
+        reference::resolve_location(&locations, value).map(Some)
     }
 }
 
@@ -230,15 +358,48 @@ fn retry_after_seconds(headers: &HeaderMap) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Mutex;
 
     use reqwest::StatusCode;
 
     use super::*;
-    use crate::domain::{SearchQuery, SearchSort};
+    use crate::domain::{AdType, SearchQuery, SearchSort};
 
     const SEARCH_FIXTURE: &str = include_str!("../../../tests/fixtures/search.json");
     const DETAIL_FIXTURE: &str = include_str!("../../../tests/fixtures/detail.json");
+    const CATEGORY_FIXTURE: &str = r#"{
+        "{http://www.ebayclassifiedsgroup.com/schema/category/v1}categories": {
+            "value": {
+                "category": [
+                    {
+                        "id-name": { "value": "Alle Kategorien" },
+                        "localized-name": { "value": "Alle Kategorien" },
+                        "category": [
+                            {
+                                "id": "100",
+                                "id-name": { "value": "Synthetic parent" },
+                                "localized-name": { "value": "Synthetic parent" }
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }"#;
+    const LOCATION_FIXTURE: &str = r#"{
+        "{http://www.ebayclassifiedsgroup.com/schema/location/v1}locations": {
+            "value": {
+                "location": [
+                    {
+                        "id": "3331",
+                        "id-name": { "value": "Teststadt" },
+                        "localized-name": { "value": "Teststadt" }
+                    }
+                ]
+            }
+        }
+    }"#;
 
     struct FakeTransport {
         requests: Mutex<Vec<HttpRequest>>,
@@ -288,6 +449,83 @@ mod tests {
         }
     }
 
+    struct SequenceTransport {
+        requests: Mutex<Vec<HttpRequest>>,
+        responses: Mutex<VecDeque<HttpResponse>>,
+    }
+
+    impl SequenceTransport {
+        fn new(bodies: &[&str]) -> Arc<Self> {
+            let responses = bodies
+                .iter()
+                .map(|body| HttpResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: body.as_bytes().to_vec(),
+                })
+                .collect();
+            Arc::new(Self {
+                requests: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses),
+            })
+        }
+
+        fn requests(&self) -> std::sync::MutexGuard<'_, Vec<HttpRequest>> {
+            self.requests.lock().expect("request lock")
+        }
+    }
+
+    #[async_trait]
+    impl Transport for SequenceTransport {
+        async fn send(&self, request: HttpRequest) -> Result<HttpResponse> {
+            self.requests.lock().expect("request lock").push(request);
+            self.responses
+                .lock()
+                .expect("response lock")
+                .pop_front()
+                .ok_or_else(|| Error::Internal("missing test response".to_owned()))
+        }
+    }
+
+    struct RoutingTransport {
+        requests: Mutex<Vec<HttpRequest>>,
+        search_body: Vec<u8>,
+        category_body: Vec<u8>,
+        location_body: Vec<u8>,
+    }
+
+    impl RoutingTransport {
+        fn new(search: &str, categories: &str, locations: &str) -> Arc<Self> {
+            Arc::new(Self {
+                requests: Mutex::new(Vec::new()),
+                search_body: search.as_bytes().to_vec(),
+                category_body: categories.as_bytes().to_vec(),
+                location_body: locations.as_bytes().to_vec(),
+            })
+        }
+
+        fn requests(&self) -> std::sync::MutexGuard<'_, Vec<HttpRequest>> {
+            self.requests.lock().expect("request lock")
+        }
+    }
+
+    #[async_trait]
+    impl Transport for RoutingTransport {
+        async fn send(&self, request: HttpRequest) -> Result<HttpResponse> {
+            let body = match request.url.path() {
+                "/api/categories.json" => self.category_body.clone(),
+                "/api/locations.json" => self.location_body.clone(),
+                _ => self.search_body.clone(),
+            };
+            self.requests.lock().expect("request lock").push(request);
+            Ok(HttpResponse {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body,
+            })
+        }
+    }
+
     fn settings() -> AppApiSettings {
         AppApiSettings::new(
             "https://api.example.invalid",
@@ -299,8 +537,15 @@ mod tests {
 
     fn query() -> SearchQuery {
         let mut query = SearchQuery::new("raspberry pi");
+        query.category = Some("217".to_owned());
+        query.location_id = Some("4910".to_owned());
+        query.radius_km = Some(10);
         query.min_price_cents = Some(12_50);
         query.max_price_cents = Some(80_00);
+        query.ad_type = AdType::Wanted;
+        query.picture_required = true;
+        query.buy_now_only = true;
+        query.include_top_ads = true;
         query.sort = Some(SearchSort::PriceAscending);
         query.cursor = Some("2".to_owned());
         query
@@ -317,6 +562,7 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.page, 2);
         assert_eq!(page.size, 25);
+        assert_eq!(page.pages_fetched, 1);
         assert_eq!(page.next_cursor.as_deref(), Some("3"));
 
         let first = &page.items[0];
@@ -359,9 +605,18 @@ mod tests {
         assert_eq!(pairs.get("q").map(String::as_str), Some("raspberry pi"));
         assert_eq!(pairs.get("page").map(String::as_str), Some("2"));
         assert_eq!(pairs.get("size").map(String::as_str), Some("25"));
-        assert_eq!(pairs.get("adType").map(String::as_str), Some("OFFERED"));
+        assert_eq!(pairs.get("adType").map(String::as_str), Some("WANTED"));
+        assert_eq!(pairs.get("categoryId").map(String::as_str), Some("217"));
+        assert_eq!(pairs.get("locationId").map(String::as_str), Some("4910"));
+        assert_eq!(pairs.get("distance").map(String::as_str), Some("10"));
         assert_eq!(pairs.get("minPrice").map(String::as_str), Some("12.50"));
         assert_eq!(pairs.get("maxPrice").map(String::as_str), Some("80"));
+        assert_eq!(
+            pairs.get("pictureRequired").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(pairs.get("buyNowOnly").map(String::as_str), Some("true"));
+        assert_eq!(pairs.get("includeTopAds").map(String::as_str), Some("true"));
         assert_eq!(
             pairs.get("sortType").map(String::as_str),
             Some("PRICE_ASCENDING")
@@ -387,6 +642,61 @@ mod tests {
                 .get(HeaderName::from_static("x-ebayk-app"))
                 .is_some()
         );
+    }
+
+    fn query_map(request: &HttpRequest) -> std::collections::HashMap<String, String> {
+        request
+            .url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn multiple_pages_are_merged_and_deduplicated() {
+        let transport = SequenceTransport::new(&[SEARCH_FIXTURE, SEARCH_FIXTURE]);
+        let provider =
+            MobileApiProvider::with_transport(settings(), transport.clone()).expect("provider");
+        let mut query = SearchQuery::new("synthetic");
+        query.pages = 2;
+
+        let page = provider.search(&query).await.expect("search page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.page, 1);
+        assert_eq!(page.pages_fetched, 2);
+        assert_eq!(page.next_cursor.as_deref(), Some("3"));
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        let pages = requests
+            .iter()
+            .map(|request| query_map(request).get("page").cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(pages, ["1", "2"]);
+    }
+
+    #[tokio::test]
+    async fn resolves_category_and_location_names_before_searching() {
+        let transport = RoutingTransport::new(SEARCH_FIXTURE, CATEGORY_FIXTURE, LOCATION_FIXTURE);
+        let provider =
+            MobileApiProvider::with_transport(settings(), transport.clone()).expect("provider");
+        let mut query = SearchQuery::new("synthetic");
+        query.category = Some("Synthetic parent".to_owned());
+        query.location = Some("Teststadt".to_owned());
+
+        let page = provider.search(&query).await.expect("search page");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.pages_fetched, 1);
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].url.path(), "/api/categories.json");
+        assert_eq!(requests[1].url.path(), "/api/locations.json");
+        assert_eq!(requests[2].url.path(), "/api/ads.json");
+        let pairs = query_map(&requests[2]);
+        assert_eq!(pairs.get("categoryId").map(String::as_str), Some("100"));
+        assert_eq!(pairs.get("locationId").map(String::as_str), Some("3331"));
     }
 
     #[tokio::test]

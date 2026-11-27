@@ -30,14 +30,37 @@ impl SearchSort {
     }
 }
 
+/// The kind of ad to search for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AdType {
+    /// Offered ads, the normal marketplace search.
+    #[default]
+    Offered,
+    /// Wanted ads.
+    Wanted,
+}
+
+impl AdType {
+    /// Returns the value understood by the mobile API.
+    pub const fn as_api_value(self) -> &'static str {
+        match self {
+            Self::Offered => "OFFERED",
+            Self::Wanted => "WANTED",
+        }
+    }
+}
+
 /// A search request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchQuery {
     /// Free-text query.
     pub query: String,
-    /// Provider category identifier.
-    pub category_id: Option<String>,
-    /// Provider location identifier.
+    /// Provider category id or name.
+    pub category: Option<String>,
+    /// Provider location name or postal code.
+    pub location: Option<String>,
+    /// Numeric provider location id.
     pub location_id: Option<String>,
     /// Search radius in kilometres.
     pub radius_km: Option<u32>,
@@ -45,10 +68,20 @@ pub struct SearchQuery {
     pub min_price_cents: Option<i64>,
     /// Maximum price in euro cents.
     pub max_price_cents: Option<i64>,
+    /// Search for offered or wanted ads.
+    pub ad_type: AdType,
+    /// Only return ads with at least one picture.
+    pub picture_required: bool,
+    /// Only return ads with a buy-now option.
+    pub buy_now_only: bool,
+    /// Include paid top ads.
+    pub include_top_ads: bool,
     /// Provider sort order.
     pub sort: Option<SearchSort>,
     /// Maximum number of results per page.
     pub limit: usize,
+    /// Number of sequential pages to fetch.
+    pub pages: u32,
     /// Opaque cursor returned by a previous page.
     pub cursor: Option<String>,
 }
@@ -66,6 +99,9 @@ impl SearchQuery {
     pub fn validate(&self) -> Result<()> {
         if self.limit == 0 || self.limit > 50 {
             return Err(Error::Input("limit must be between 1 and 50".to_owned()));
+        }
+        if self.pages == 0 || self.pages > 10 {
+            return Err(Error::Input("pages must be between 1 and 10".to_owned()));
         }
 
         for (name, value) in [
@@ -85,14 +121,28 @@ impl SearchQuery {
             }
         }
 
-        if let Some(category_id) = &self.category_id {
-            validate_numeric_id("category id", category_id)?;
+        if self.location.is_some() && self.location_id.is_some() {
+            return Err(Error::Input(
+                "pass either a location name or a numeric location id, not both".to_owned(),
+            ));
+        }
+
+        if let Some(category) = &self.category {
+            validate_reference("category", category)?;
+        }
+        if let Some(location) = &self.location {
+            validate_reference("location", location)?;
         }
         if let Some(location_id) = &self.location_id {
             validate_numeric_id("location id", location_id)?;
         }
         if let Some(cursor) = &self.cursor {
             cursor_page(cursor)?;
+        }
+
+        let start_page = self.page()?;
+        if start_page.checked_add(self.pages - 1).is_none() {
+            return Err(Error::Input("page range is too large".to_owned()));
         }
 
         Ok(())
@@ -105,6 +155,13 @@ impl SearchQuery {
             None => Ok(1),
         }
     }
+}
+
+fn validate_reference(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(Error::Input(format!("{name} must not be empty")));
+    }
+    Ok(())
 }
 
 fn validate_numeric_id(name: &str, value: &str) -> Result<()> {
@@ -132,13 +189,19 @@ impl Default for SearchQuery {
     fn default() -> Self {
         Self {
             query: String::new(),
-            category_id: None,
+            category: None,
+            location: None,
             location_id: None,
             radius_km: None,
             min_price_cents: None,
             max_price_cents: None,
+            ad_type: AdType::Offered,
+            picture_required: false,
+            buy_now_only: false,
+            include_top_ads: false,
             sort: None,
             limit: 25,
+            pages: 1,
             cursor: None,
         }
     }
@@ -149,8 +212,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_limit_is_stable() {
-        assert_eq!(SearchQuery::default().limit, 25);
+    fn default_limit_and_page_count_are_stable() {
+        let query = SearchQuery::default();
+        assert_eq!(query.limit, 25);
+        assert_eq!(query.pages, 1);
+        assert_eq!(query.ad_type, AdType::Offered);
+        assert!(!query.picture_required);
+        assert!(!query.buy_now_only);
+        assert!(!query.include_top_ads);
     }
 
     #[test]
@@ -158,18 +227,47 @@ mod tests {
         let query = SearchQuery::new("raspberry pi");
         assert_eq!(query.query, "raspberry pi");
         assert_eq!(query.limit, 25);
+        assert!(query.location.is_none());
         assert!(query.location_id.is_none());
     }
 
     #[test]
-    fn validation_rejects_invalid_limits_and_ranges() {
+    fn validation_rejects_invalid_limits_ranges_and_page_counts() {
         let mut query = SearchQuery::new("test");
         query.limit = 0;
         assert!(query.validate().is_err());
 
         query.limit = 25;
+        query.pages = 0;
+        assert!(query.validate().is_err());
+        query.pages = 11;
+        assert!(query.validate().is_err());
+
+        query.pages = 1;
         query.min_price_cents = Some(100);
         query.max_price_cents = Some(99);
+        assert!(query.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_both_location_forms() {
+        let mut query = SearchQuery::new("test");
+        query.location = Some("Berlin".to_owned());
+        query.location_id = Some("3331".to_owned());
+        assert!(query.validate().is_err());
+    }
+
+    #[test]
+    fn reference_names_are_accepted_and_numeric_location_ids_are_validated() {
+        let mut query = SearchQuery::new("test");
+        query.category = Some("Fahrräder & Zubehör".to_owned());
+        query.location = Some("Berlin".to_owned());
+        assert!(query.validate().is_ok());
+
+        query.location = None;
+        query.location_id = Some("3331".to_owned());
+        assert!(query.validate().is_ok());
+        query.location_id = Some("Berlin".to_owned());
         assert!(query.validate().is_err());
     }
 
@@ -186,8 +284,10 @@ mod tests {
     }
 
     #[test]
-    fn sort_values_are_stable() {
+    fn sort_and_ad_type_values_are_stable() {
         assert_eq!(SearchSort::DateDescending.as_api_value(), "DATE_DESCENDING");
         assert_eq!(SearchSort::PriceAscending.as_api_value(), "PRICE_ASCENDING");
+        assert_eq!(AdType::Offered.as_api_value(), "OFFERED");
+        assert_eq!(AdType::Wanted.as_api_value(), "WANTED");
     }
 }

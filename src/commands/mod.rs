@@ -20,10 +20,19 @@ async fn search_query(query: &SearchQuery, format: Format) -> Result<()> {
     match format {
         Format::Json => write_json(&page),
         Format::Human => {
-            println!(
-                "{} result(s), page {} ({} per page)",
-                page.total, page.page, page.size
-            );
+            let pages = page.pages_fetched.max(1);
+            if pages == 1 {
+                println!(
+                    "{} result(s), page {} ({} per page)",
+                    page.total, page.page, page.size
+                );
+            } else {
+                let last_page = page.page.saturating_add(pages - 1);
+                println!(
+                    "{} result(s), pages {}-{} ({} per page, {} fetched)",
+                    page.total, page.page, last_page, page.size, pages
+                );
+            }
             for listing in &page.items {
                 println!(
                     "{}\t{}\t{}\t{}",

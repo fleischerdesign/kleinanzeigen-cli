@@ -20,6 +20,8 @@ pub struct SearchPage {
     pub page: u32,
     /// Requested page size.
     pub size: u32,
+    /// Number of provider pages that were actually fetched.
+    pub pages_fetched: u32,
     /// Cursor for the next page, if any.
     pub next_cursor: Option<String>,
 }
@@ -53,6 +55,7 @@ mod tests {
                 total: 0,
                 page: 1,
                 size: 25,
+                pages_fetched: 1,
                 next_cursor: None,
             })
         }

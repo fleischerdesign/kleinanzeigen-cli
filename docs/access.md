@@ -34,10 +34,12 @@ Re-check the read path when the app or the transport changes.
 
 ## Operating decisions
 
-- **Request budget:** one request per invocation, no concurrency and no
-  automatic retries. A 25-second request timeout, a page size of at most 50 and
-  an 8 MiB response cap. A numeric `Retry-After` header is reported as
-  `retry_after_seconds`; the caller decides when to retry.
+- **Request budget:** one request per page, at most 10 pages per search, plus at
+  most one category and one location lookup. Pages are fetched sequentially with
+  a 500 ms pause; no concurrency and no automatic retries. A 25-second request
+  timeout, a page size of at most 50 and an 8 MiB response cap. A numeric
+  `Retry-After` header is reported as `retry_after_seconds`; the caller decides
+  when to retry.
 - **State paths:** none. Settings come from the environment. There is no cache,
   session directory or audit log yet. `.env.local` is local configuration, not
   application state.

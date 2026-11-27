@@ -7,4 +7,4 @@ mod listing;
 mod query;
 
 pub use listing::{Attribute, Category, Listing, ListingId, Location, Price};
-pub use query::{SearchQuery, SearchSort};
+pub use query::{AdType, SearchQuery, SearchSort};

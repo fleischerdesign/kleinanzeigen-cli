@@ -43,6 +43,7 @@ pub(crate) fn search_page(response: SearchResponse, page: u32, size: u32) -> Res
         total,
         page,
         size,
+        pages_fetched: 1,
         next_cursor,
     })
 }

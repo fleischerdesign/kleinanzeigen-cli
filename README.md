@@ -78,15 +78,32 @@ kleinanzeigen search "raspberry pi" --max-price 80 --limit 10 --json
 # Follow the cursor from the previous result.
 kleinanzeigen search "raspberry pi" --cursor 2 --json
 
+# Resolve a category name and a place name.
+kleinanzeigen search "fahrrad" --category "Fahrräder & Zubehör" --location Berlin --radius 20 --json
+
+# Fetch two pages at once.
+kleinanzeigen search "fahrrad" --pages 2 --limit 25 --json
+
 # Fetch one listing.
 kleinanzeigen get 1234567890 --json
 ```
 
-Search filters: `--category <ID>`, `--location-id <ID>`, `--radius <KM>`,
-`--min-price <EUROS>`, `--max-price <EUROS>`, `--limit <1-50>`, `--cursor`,
-`--sort <date-descending|price-ascending|price-descending|distance-ascending>`.
-Prices are decimal euros, not floats in the shell. Search is limited to offered
-ads and one page per request.
+Search filters:
+
+- `--category <ID|NAME>` — numeric id or a category name.
+- `--location <NAME|POSTCODE>` — place name or postal code; ambiguous
+  postal codes list their numeric ids.
+- `--location-id <ID>` — skip the lookup with a numeric location id.
+- `--radius <KM>`, `--min-price <EUROS>`, `--max-price <EUROS>`
+- `--ad-type <offered|wanted>` — default `offered`.
+- `--picture-required`, `--buy-now-only`, `--include-top-ads`
+- `--limit <1-50>`, `--pages <1-10>`, `--cursor <CURSOR>`
+- `--sort <date-descending|price-ascending|price-descending|distance-ascending>`
+
+Prices are decimal euros, not floats in the shell. Category and location names
+cost one lookup request each; numeric ids skip it. Multi-page searches fetch
+sequentially with a short delay and deduplicate listings by id.
+`--include-top-ads` may add paid top ads beyond the configured page size.
 
 Planned, not implemented: `watch`, `login`, own ads, drafts and publishing,
 messages, MCP.
@@ -144,6 +161,7 @@ One search result:
     "total": 2,
     "page": 1,
     "size": 25,
+    "pages_fetched": 1,
     "next_cursor": "2"
   }
 }
@@ -181,7 +199,8 @@ Exit codes:
 - On failure, stderr contains exactly one JSON error object; logs are suppressed in JSON mode.
 - `--help` and `--version` are plaintext and exit `0`; they are not command results.
 - Every object carries `schema_version`. It changes only when the machine contract changes, independent of the binary version.
-- Search pages carry `total`, `page`, `size` and `next_cursor`. The cursor is opaque: pass it back as `--cursor`.
+- Search pages carry `total`, `page`, `size`, `pages_fetched` and `next_cursor`. The cursor is opaque: pass it back as `--cursor`.
+- With `--pages > 1`, `items` is the deduplicated union of the fetched pages; `size` remains the per-page size and `pages_fetched` says how many pages were actually fetched.
 - `posted_at` is an RFC 3339 string or `null`.
 - `retry_after_seconds` appears only when the provider sent a numeric `Retry-After` header.
 - `watch` will emit newline-delimited JSON (one event per line) with the same `schema_version`; a stream failure ends with the error object.
@@ -215,6 +234,7 @@ src/
         ├── config.rs     environment settings and app Basic auth
         ├── dto.rs        transport DTOs
         ├── convert.rs    DTO-to-domain conversion and validation
+        ├── reference.rs  category and location name resolution
         ├── html.rs       conservative text normalization
         └── transport.rs  reqwest transport boundary
 ```
@@ -239,9 +259,11 @@ output contract, not a serialization of internal structs.
   public image URLs.
 - Logs never contain `Authorization`, the app install id, tokens or response
   bodies. JSON mode suppresses logs entirely.
-- One request per invocation, no automatic retries, a 25-second timeout, a
-  maximum page size of 50 and an 8 MiB response cap. A numeric `Retry-After`
-  header is surfaced as `retry_after_seconds`.
+- One request per page, at most 10 pages per search, plus at most one category
+  and one location lookup. Pages are fetched sequentially with a 500 ms pause.
+  No automatic retries, a 25-second timeout, a maximum page size of 50 and an
+  8 MiB response cap. A numeric `Retry-After` header is surfaced as
+  `retry_after_seconds`.
 
 ## Development
 
