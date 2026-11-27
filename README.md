@@ -420,6 +420,7 @@ Exit codes:
 | --- | --- | --- |
 | Nix package | `x86_64-linux`, `aarch64-linux` | `x86_64-linux` built by `nix flake check`; `aarch64-linux` declared, not built in CI |
 | Cargo binary | Linux, macOS, Windows | tested on `ubuntu-latest`, `macos-latest`, `windows-latest` |
+| MCP server | stdio, same targets as the CLI | protocol tests in `cargo test`; installed by the Nix package |
 | Rust | 1.85+ | MSRV job on 1.85 |
 
 ## Architecture
@@ -521,10 +522,9 @@ The dev shell provides `cargo`, `rustc`, `rustfmt`, `clippy` and `rust-analyzer`
 
 The roadmap is ordered by evidence, not by feature count. Each step has an
 abort condition; a later step does not start on an unproven earlier one.
-The public read surface and local no-account state are implemented: search,
-detail, reference data, discovery, metadata, counters, `watch`, price history,
-saved searches and export. The read-only MCP server exposes the same surface.
-The account milestones are not.
+The public read surface, local no-account state and the read-only MCP server are
+implemented. The account milestones are not. The steps below keep their abort
+conditions as the access record.
 
 ### 1. Access decision and transport spike
 
@@ -540,7 +540,7 @@ Do not build the rest on it.
 **Risk:** the mobile API is private and can change with app updates. Record
 that dependency explicitly; do not present it as a public contract.
 
-**Not included:** login, live mutations, SQLite.
+**Not included:** login, live mutations.
 
 ### 2. Usable read release
 
@@ -551,8 +551,8 @@ synthetic tests and Nix package with this scope.
 **Abort:** `get` is not reliably interpretable. If only `search` is unstable,
 ship `get` alone.
 
-**Not included:** SQLite, account features, release automation. `watch` is
-implemented with a bounded polling budget.
+**Not included:** account features, release automation. `watch` is implemented
+with a bounded polling budget.
 
 ### 3. Session and own ads read
 
