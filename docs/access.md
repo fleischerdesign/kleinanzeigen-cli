@@ -28,7 +28,7 @@ gate for the read path and the starting point for account features.
 | Loyalty top-trader badge | Gateway loyalty-service | no | 404 for a normal public seller | Omit |
 | Category ad schema | Mobile CAPI `ads/metadata/{id}.json` | no | Internal read/write schema, not a public search filter | Omit |
 | Watch | Polling the public search endpoint | yes | Unit and local-shell tests; live snapshot | Stop the stream |
-| MCP server | Local stdio JSON-RPC over the same provider | yes | Protocol and tool tests; live smoke | Read-only tools only |
+| MCP server | Local stdio JSON-RPC over the same provider | yes | Handshake, version, tool and error tests; live smoke | Read-only tools only |
 | Persistent watch state | Local SQLite, opt-in | yes | Restart/resume test | Stateless by default |
 | Price history | Local SQLite, opt-in | yes | Round-trip and price-change tests | Empty history |
 | Saved searches | Local SQLite | yes | Local-shell lifecycle test | Not found |
@@ -79,14 +79,19 @@ Re-check the read path when the app or the transport changes.
 - **State paths:** local state is opt-in and lives in
   `${XDG_STATE_HOME:-$HOME/.local/state}/kleinanzeigen-cli/state.db`
   (`LOCALAPPDATA` on Windows); `KLEINANZEIGEN_STATE_DIR` overrides the directory
-  for tests or portable use. The directory is `0700` and the database `0600`.
-  Settings still come from the environment. `.env.local` is local configuration,
-  not application state.
+  for tests or portable use. A newly created directory is `0700` and the
+  database `0600`; an existing override directory is not chmodded. Settings
+  still come from the environment. `.env.local` is local configuration, not
+  application state.
 - **Storage:** local SQLite stores public listing fields, watch seen ids, price
-  points and saved searches. It stores no credentials, cookies, tokens or raw
-  response bodies. Deleting the file resets all local state. Without `--store`,
-  `--resume`, `--fresh` or `--saved`, `watch` keeps only the seen ids in memory.
-  The MCP server reads this database without creating or changing it.
+  points and saved searches. Saved search names and terms are user data even
+  though listing data is public. It stores no credentials, cookies, tokens or
+  raw response bodies. Deleting the file resets all local state. Without
+  `--store`, `--resume`, `--fresh` or `--saved`, `watch` keeps only the seen ids
+  in memory. A newly created state directory is `0700` and the database `0600`;
+  the CLI does not chmod an existing override directory. The MCP server reads
+  this database without creating or changing it, including its bytes and
+  permissions. Unix modes do not apply on Windows.
 - **Log redaction:** no `Authorization`, app install id, token, response body,
   contact data or coordinates in logs. In JSON mode logging is disabled. A
   request log line carries only the operation, HTTP status and duration.

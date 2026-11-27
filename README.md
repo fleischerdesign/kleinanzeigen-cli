@@ -118,7 +118,7 @@ kleinanzeigen saved add camper "fendt bianco" --max-price 20000 --interval 15m
 kleinanzeigen saved list --json
 kleinanzeigen watch --saved camper --store --json
 kleinanzeigen export --kind history --format jsonl
-kleinanzeigen export --kind listings --format csv --limit 100
+kleinanzeigen export --kind listings --format csv-safe --limit 100
 
 # Read-only MCP server over stdio.
 kleinanzeigen-mcp
@@ -159,19 +159,24 @@ memory by default. The interval is at least `30s`; the default is `15m`.
 with a new snapshot unless state is used.
 
 `--store` persists seen ids and price points in the local SQLite state.
-`--resume` starts from the stored seen set without replaying the snapshot, and
-`--fresh` clears that set and starts a new snapshot. `--saved <name>` supplies
-the query, filters and interval from a saved search; filters and `--interval`
-cannot be combined with it. State is optional and local; delete the database to
-reset it.
-
-Planned, not implemented: `login`, own ads, drafts and publishing, messages.
+`--resume` starts from the stored seen set without replaying the snapshot, must
+find existing state, and still records price changes without re-emitting known
+ids. `--fresh` clears that set and starts a new snapshot; the reset happens only
+after a successful first fetch, so a failed run cannot lose resume progress.
+`--saved <name>` supplies the query, filters and interval from a saved search;
+filters and `--interval` cannot be combined with it. State is optional and
+local; delete the database to reset it. The watch key is normalized and
+versioned, so whitespace in the query does not create a second seen set.
 
 ## MCP server
 
 `kleinanzeigen-mcp` serves the same read-only surface over stdio using
-newline-delimited JSON-RPC 2.0. It negotiates protocol `2025-06-18` and accepts
-`2024-11-05` or `2025-03-26` from the client.
+newline-delimited JSON-RPC 2.0. It supports protocol `2025-06-18` and
+`2024-11-05`; a client that requests another version, including `2025-03-26`,
+receives `2025-06-18` as the server's fallback. The initialization handshake
+(`initialize` request, then `notifications/initialized`) is required before
+tools; requests use string or integer ids, never `null`, and batches are not
+supported.
 
 Tools: `search`, `get`, `similar`, `seller_other`, `gallery`, `profile`,
 `stats`, `stats_batch`, `images`, `categories`, `locations`, `search_metadata`,
@@ -365,9 +370,13 @@ array. `saved remove` returns `{"name":"camper","removed":true}`:
 
 `export` is a streaming command: `--format jsonl` writes one object per line
 without the success envelope, and `--format csv` writes a header and rows.
-`--kind history` is the default and exports price points; `--kind listings`
-exports stored listings with their last observed values. `--listing` restricts
-either dataset to one id and `--limit` bounds the row count.
+`--format csv-safe` writes the same rows but prefixes text fields that start
+with `=`, `+`, `-`, `@`, tab or carriage return with `'`, so a spreadsheet does
+not execute listing text as a formula. Raw `csv` preserves the data unchanged
+and is not spreadsheet-safe. `--kind history` is the default and exports price
+points; `--kind listings` exports stored listings with their last observed
+values. `--listing` restricts either dataset to one id and `--limit` bounds the
+row count.
 
 ```json
 {"listing_id":"1234567890","seen_at":1764246000,"amount_cents":1250,"currency":"EUR","price_type":"PLEASE_CONTACT"}
@@ -474,14 +483,18 @@ output contract, not a serialization of internal structs.
 - No telemetry and no remote cache. `watch` is stateless by default. With
   `--store`, `--resume` or `--fresh`, the CLI keeps a local SQLite database at
   `${XDG_STATE_HOME:-$HOME/.local/state}/kleinanzeigen-cli/state.db`; set
-  `KLEINANZEIGEN_STATE_DIR` to choose another directory. The directory is
-  `0700`, the database `0600`.
+  `KLEINANZEIGEN_STATE_DIR` to choose another directory. A newly created state
+  directory is `0700` and the database `0600`; an existing override directory is
+  not chmodded. Directory modes are Unix-only.
 - The state database holds public listing fields, watch seen ids, price points
-  and saved searches. It holds no credentials, cookies, tokens or raw response
-  bodies. Delete the file to reset all local state.
+  and saved searches. Saved search terms and names are user data even though
+  listing data is public. The database holds no credentials, cookies, tokens or
+  raw response bodies. Delete the file to reset all local state.
 - The MCP server exposes only read tools. `saved_list`, `saved_show` and
-  `history` read an existing database and never create one; `watch_once` does
-  not write state.
+  `history` read an existing database without creating or changing it, including
+  its bytes and permissions; `watch_once` does not write state. An MCP host can
+  forward tool output to its model or other services, so treat that output as
+  leaving the local process.
 - Listing output includes city, postal code, the public seller id and public
   image URLs. Exact ad coordinates, contact names and phone numbers are not
   emitted by search or get. The explicit `profile` command returns the public
@@ -518,78 +531,20 @@ nix flake check
 The dev shell provides `cargo`, `rustc`, `rustfmt`, `clippy` and `rust-analyzer`.
 `direnv` loads it automatically via `.envrc`.
 
-## Roadmap
+## Scope
 
-The roadmap is ordered by evidence, not by feature count. Each step has an
-abort condition; a later step does not start on an unproven earlier one.
-The public read surface, local no-account state and the read-only MCP server are
-implemented. The account milestones are not. The steps below keep their abort
-conditions as the access record.
+Implemented: the public read surface (search, detail, reference data,
+discovery, metadata, counters, image variants, location detail and flag
+reasons), optional local SQLite state (watch progress, price history, saved
+searches and JSONL/CSV export) and the read-only stdio MCP server.
+Intentionally absent: account login and sessions, own ads, drafts and publishing,
+messages, watchlist and all mutations, browser automation and cookie import.
+Those require a separate account-scoped design and are not implemented
+speculatively.
 
-### 1. Access decision and transport spike
-
-Record in [`docs/access.md`](docs/access.md) which access covers each function.
-Prove one detail read over the chosen mobile-API transport; add a search read
-only if the same transport supports it. Convert the response into a domain
-object and derive a sanitized, synthetic fixture. Before the first provider
-commit, decide config/state paths, request budget and log redaction.
-
-**Abort:** the transport cannot produce a stable, interpretable detail read.
-Do not build the rest on it.
-
-**Risk:** the mobile API is private and can change with app updates. Record
-that dependency explicitly; do not present it as a public contract.
-
-**Not included:** login, live mutations.
-
-### 2. Usable read release
-
-`get` first, then `search` with limit and cursor if the transport supports both.
-Versioned JSON, stable errors, bounded reads, `Retry-After`. Publish the CLI,
-synthetic tests and Nix package with this scope.
-
-**Abort:** `get` is not reliably interpretable. If only `search` is unstable,
-ship `get` alone.
-
-**Not included:** account features, release automation. `watch` is implemented
-with a bounded polling budget.
-
-### 3. Session and own ads read
-
-Build a supported login and one account read operation as one slice. Before
-that, decide token expiry, refresh/logout and account binding. Use the OS
-keyring or an explicitly protected secret file for headless use; `doctor`
-reports status, never secrets.
-
-**Abort:** no safe session lifecycle (captcha/MFA, token storage) — stay
-read-only.
-
-**Not included:** mutations, browser cookie import, raw credential capture.
-
-### 4. First mutation and local drafts
-
-Build the plan envelope — account, target, change — and require `--dry-run`,
-`--confirm <plan-id>` and a redacted audit log **before** the first write.
-Start with pause and activate. Local JSON drafts can land in parallel; publish
-only after this path, with its own preview.
-
-**Abort:** the confirmed plan cannot be bound to the exact mutation, or an
-unknown outcome cannot be handled safely. Never retry blindly after a timeout
-without an idempotency guarantee.
-
-**Not included:** delete, paid renew, YAML, messages.
-
-### 5. Extensions as needed
-
-Read messages first; replies are separately confirmed. `watch` is implemented
-with an interval floor, an explicit poll limit and opt-in local state for resume,
-price history and saved searches. Renew and delete deliberately separate. The
-read-only stdio MCP wrapper over the stable read contract is implemented.
-
-**Abort:** unclear cost, permission, load budget or concrete user need for the
-individual feature.
-
-**Not included:** an obligation to implement every optional feature.
+The mobile API is private and can change with app updates. [`docs/access.md`](docs/access.md)
+records the verified access and the endpoints deliberately omitted; see
+[`SECURITY.md`](SECURITY.md) for the secret and data boundary.
 
 ## Fixture policy
 

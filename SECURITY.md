@@ -14,7 +14,12 @@ public issue for a vulnerability, a leaked token or account data.
 - Public seller profiles are returned only by the explicit `profile` command;
   `search` and `get` omit contact names, phone numbers and exact coordinates.
 - The MCP server exposes only read tools and never writes local state. It uses
-  the same data minimization as the CLI.
+  the same data minimization as the CLI. An MCP host can forward tool output to
+  its model or other services, so treat that output as leaving the local
+  process.
+- Saved search names and terms are user data even though the listings they
+  describe are public. Unix file modes do not apply on Windows; protect the
+  state directory with the platform's access controls there.
 - If a credential is exposed, rotate it at the source; deleting a commit is not
   enough.
 
