@@ -4,6 +4,8 @@
 //! newline-delimited JSON-RPC 2.0. Stdout carries protocol messages only;
 //! diagnostics belong on stderr. No tool mutates provider data or local state.
 
+use std::sync::OnceLock;
+
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -16,12 +18,20 @@ use crate::provider::mobile_api::{AppApiSettings, MobileApiProvider};
 use crate::state::State;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
-const SUPPORTED_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
+const SUPPORTED_VERSIONS: [&str; 2] = ["2024-11-05", "2025-06-18"];
+const ERROR_NOT_INITIALIZED: i64 = -32002;
+
+#[derive(Default)]
+struct Session {
+    initialized: bool,
+    ready: bool,
+}
 
 /// Serves MCP requests on stdin until the stream closes.
 pub async fn run() -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
+    let mut session = Session::default();
 
     while let Some(line) = lines
         .next_line()
@@ -33,7 +43,7 @@ pub async fn run() -> Result<()> {
         }
 
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(request) => handle_request(request).await,
+            Ok(request) => handle_request(request, &mut session).await,
             Err(error) => Some(error_response(
                 Value::Null,
                 -32700,
@@ -64,7 +74,7 @@ enum Failure {
     Tool(Error),
 }
 
-async fn handle_request(request: Value) -> Option<Value> {
+async fn handle_request(request: Value, session: &mut Session) -> Option<Value> {
     let Some(object) = request.as_object() else {
         return Some(error_response(
             Value::Null,
@@ -73,30 +83,95 @@ async fn handle_request(request: Value) -> Option<Value> {
         ));
     };
 
-    let id = object.get("id").cloned();
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return id.map(|id| error_response(id, -32600, "invalid request: jsonrpc must be 2.0"));
+        return Some(error_response(
+            request_id(object),
+            -32600,
+            "invalid request: jsonrpc must be 2.0",
+        ));
     }
 
     let Some(method) = object.get("method").and_then(Value::as_str) else {
-        return id.map(|id| error_response(id, -32600, "invalid request: method is required"));
+        return Some(error_response(
+            request_id(object),
+            -32600,
+            "invalid request: method is required",
+        ));
     };
 
-    // Notifications expect no response and must not trigger tool execution.
-    let id = id?;
+    let id = match object.get("id") {
+        None => {
+            // MCP notifications must not receive a response. Only the
+            // notification namespace is accepted without an id.
+            if method.starts_with("notifications/") {
+                if method == "notifications/initialized" && session.initialized {
+                    session.ready = true;
+                }
+                return None;
+            }
+            return Some(error_response(
+                Value::Null,
+                -32600,
+                "request id is required",
+            ));
+        }
+        Some(Value::String(value)) => Value::String(value.clone()),
+        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => {
+            Value::Number(number.clone())
+        }
+        Some(_) => {
+            return Some(error_response(
+                Value::Null,
+                -32600,
+                "request id must be a string or integer",
+            ));
+        }
+    };
 
     let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
-    match dispatch(method, &params).await {
+    if !params.is_object() {
+        return Some(error_response(id, -32602, "params must be an object"));
+    }
+
+    match dispatch(method, &params, session).await {
         Ok(result) => Some(success_response(id, result)),
         Err(Failure::Protocol(code, message)) => Some(error_response(id, code, &message)),
         Err(Failure::Tool(error)) => Some(success_response(id, tool_error(&error))),
     }
 }
 
-async fn dispatch(method: &str, params: &Value) -> std::result::Result<Value, Failure> {
+fn request_id(object: &Map<String, Value>) -> Value {
+    match object.get("id") {
+        Some(Value::String(value)) => Value::String(value.clone()),
+        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => {
+            Value::Number(number.clone())
+        }
+        _ => Value::Null,
+    }
+}
+
+async fn dispatch(
+    method: &str,
+    params: &Value,
+    session: &mut Session,
+) -> std::result::Result<Value, Failure> {
     match method {
-        "initialize" => Ok(initialize(params)),
+        "initialize" => {
+            if session.initialized {
+                return Err(Failure::Protocol(
+                    -32600,
+                    "server is already initialized".to_owned(),
+                ));
+            }
+            session.initialized = true;
+            session.ready = false;
+            Ok(initialize(params))
+        }
         "ping" => Ok(json!({})),
+        _ if !session.ready => Err(Failure::Protocol(
+            ERROR_NOT_INITIALIZED,
+            "server is not initialized".to_owned(),
+        )),
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => call_tool(params).await,
         _ => Err(Failure::Protocol(
@@ -258,7 +333,7 @@ async fn run_tool(name: &str, args: &Map<String, Value>) -> Result<Value> {
         }
         "flag_reasons" => to_value(provider()?.flag_reasons().await?),
         "saved_list" => {
-            let saved = match State::open_existing_default()? {
+            let saved = match State::open_existing_read_only()? {
                 Some(state) => state.saved_list()?,
                 None => Vec::new(),
             };
@@ -272,7 +347,7 @@ async fn run_tool(name: &str, args: &Map<String, Value>) -> Result<Value> {
                     "saved search name must not be empty".to_owned(),
                 ));
             }
-            let saved = match State::open_existing_default()? {
+            let saved = match State::open_existing_read_only()? {
                 Some(state) => state.saved_get(name)?,
                 None => None,
             };
@@ -280,7 +355,7 @@ async fn run_tool(name: &str, args: &Map<String, Value>) -> Result<Value> {
         }
         "history" => {
             let id = listing_id(args, "id")?;
-            let points = match State::open_existing_default()? {
+            let points = match State::open_existing_read_only()? {
                 Some(state) => state.history(&id)?,
                 None => Vec::new(),
             };
@@ -292,9 +367,9 @@ async fn run_tool(name: &str, args: &Map<String, Value>) -> Result<Value> {
 
 fn parse_search(args: &Map<String, Value>, single_page: bool) -> Result<SearchQuery> {
     let mut query = SearchQuery::new(required_string(args, "query")?);
-    query.category = optional_string(args, "category")?;
-    query.location = optional_string(args, "location")?;
-    query.location_id = optional_string(args, "location_id")?;
+    query.category = optional_string(args, "category")?.map(|value| value.trim().to_owned());
+    query.location = optional_string(args, "location")?.map(|value| value.trim().to_owned());
+    query.location_id = optional_string(args, "location_id")?.map(|value| value.trim().to_owned());
     query.radius_km = optional_u64(args, "radius_km")?
         .map(|value| {
             u32::try_from(value).map_err(|_| Error::Input("radius_km is too large".to_owned()))
@@ -342,8 +417,12 @@ fn parse_search(args: &Map<String, Value>, single_page: bool) -> Result<SearchQu
     };
     query.pages =
         u32::try_from(pages).map_err(|_| Error::Input("pages is too large".to_owned()))?;
-    query.cursor = optional_string(args, "cursor")?;
-    query.exclude = optional_string_array(args, "exclude")?.unwrap_or_default();
+    query.cursor = optional_string(args, "cursor")?.map(|value| value.trim().to_owned());
+    query.exclude = optional_string_array(args, "exclude")?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|term| term.trim().to_owned())
+        .collect();
     query.min_rooms = optional_f64(args, "min_rooms")?;
     query.max_rooms = optional_f64(args, "max_rooms")?;
     query.min_size_m2 = optional_f64(args, "min_size_m2")?;
@@ -502,7 +581,12 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     })
 }
 
-fn tools() -> Vec<Value> {
+fn tools() -> &'static [Value] {
+    static TOOLS: OnceLock<Vec<Value>> = OnceLock::new();
+    TOOLS.get_or_init(build_tools).as_slice()
+}
+
+fn build_tools() -> Vec<Value> {
     let mut watch_schema = search_schema();
     if let Some(properties) = watch_schema
         .get_mut("properties")
