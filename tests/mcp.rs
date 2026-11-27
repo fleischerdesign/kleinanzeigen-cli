@@ -237,6 +237,41 @@ fn malformed_json_is_a_parse_error() {
 }
 
 #[test]
+fn every_argument_tool_reports_missing_input() {
+    let cases = [
+        ("search", json!({})),
+        ("get", json!({})),
+        ("similar", json!({})),
+        ("seller_other", json!({})),
+        ("profile", json!({})),
+        ("stats", json!({})),
+        ("stats_batch", json!({})),
+        ("images", json!({})),
+        ("locations", json!({})),
+        ("search_metadata", json!({})),
+        ("location", json!({})),
+        ("saved_show", json!({})),
+        ("history", json!({})),
+        ("watch_once", json!({})),
+    ];
+    let lines = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (name, arguments))| {
+            serde_json::to_string(&call(index as u64 + 1, name, arguments.clone()))
+                .expect("request JSON")
+        })
+        .collect::<Vec<_>>();
+    let session = run_session(mcp_command(), &lines);
+
+    assert_eq!(session.responses.len(), cases.len());
+    for (response, (name, _)) in session.responses.iter().zip(cases) {
+        assert_eq!(response["result"]["isError"], true, "tool {name}");
+        assert_eq!(error_code(response), "invalid_input", "tool {name}");
+    }
+}
+
+#[test]
 fn local_state_tools_are_read_only() {
     let state = TempState::new();
     let mut command = mcp_command();
