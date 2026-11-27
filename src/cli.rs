@@ -92,6 +92,15 @@ pub enum Command {
 
     /// Poll a search and emit new listings as NDJSON.
     Watch(WatchArgs),
+
+    /// Show locally recorded price history.
+    History(HistoryArgs),
+
+    /// Manage locally saved searches.
+    Saved(SavedArgs),
+
+    /// Export locally recorded price history.
+    Export(ExportArgs),
 }
 
 /// Arguments shared by search and watch.
@@ -186,6 +195,28 @@ pub struct SearchFilters {
 }
 
 impl SearchFilters {
+    /// Returns whether every filter is at its default value.
+    pub fn is_default(&self) -> bool {
+        self.category.is_none()
+            && self.location.is_none()
+            && self.location_id.is_none()
+            && self.radius.is_none()
+            && self.min_price_cents.is_none()
+            && self.max_price_cents.is_none()
+            && self.ad_type == AdTypeArg::Offered
+            && self.poster_type.is_none()
+            && !self.picture_required
+            && !self.buy_now_only
+            && !self.include_top_ads
+            && self.sort.is_none()
+            && self.limit == 25
+            && self.exclude.is_empty()
+            && self.min_rooms.is_none()
+            && self.max_rooms.is_none()
+            && self.min_size_m2.is_none()
+            && self.max_size_m2.is_none()
+    }
+
     /// Applies the shared filters to a search query.
     pub fn apply(&self, query: &mut SearchQuery) {
         query.category = self.category.clone();
@@ -247,12 +278,16 @@ impl SearchArgs {
 /// Arguments for `watch`.
 #[derive(Debug, Args)]
 pub struct WatchArgs {
-    /// Free-text query.
-    pub query: String,
+    /// Free-text query. Omit when using --saved.
+    pub query: Option<String>,
 
     /// Shared search filters.
     #[command(flatten)]
     pub filters: SearchFilters,
+
+    /// Use a saved search instead of a query and filters.
+    #[arg(long, value_name = "NAME", conflicts_with = "query")]
+    pub saved: Option<String>,
 
     /// Poll interval: 30s, 15m or 1h.
     #[arg(long, default_value = "15m", value_name = "DURATION")]
@@ -265,19 +300,35 @@ pub struct WatchArgs {
     /// Fetch one snapshot and exit.
     #[arg(long, conflicts_with = "max_polls")]
     pub once: bool,
+
+    /// Persist seen ids and price history in the local state database.
+    #[arg(long)]
+    pub store: bool,
+
+    /// Resume from the stored seen set and suppress the initial snapshot.
+    #[arg(long, conflicts_with = "fresh")]
+    pub resume: bool,
+
+    /// Clear the stored seen set and start with a new snapshot.
+    #[arg(long, conflicts_with = "resume")]
+    pub fresh: bool,
 }
 
 impl WatchArgs {
     /// Converts the parsed arguments into a one-page watch query.
-    pub fn to_query(&self) -> SearchQuery {
-        let mut query = SearchQuery::new(self.query.as_str());
+    pub fn to_query(&self) -> Result<SearchQuery, String> {
+        let query = self
+            .query
+            .as_deref()
+            .ok_or_else(|| "watch needs a query or --saved".to_owned())?;
+        let mut query = SearchQuery::new(query);
         self.filters.apply(&mut query);
         query.pages = 1;
         query.cursor = None;
         if query.sort.is_none() {
             query.sort = Some(SearchSort::DateDescending);
         }
-        query
+        Ok(query)
     }
 
     /// Returns the maximum number of polls, where zero means unlimited.
@@ -288,6 +339,119 @@ impl WatchArgs {
             self.max_polls.unwrap_or(0)
         }
     }
+
+    /// Returns whether the local state database is used.
+    pub const fn uses_state(&self) -> bool {
+        self.store || self.resume || self.fresh
+    }
+}
+
+/// Arguments for `history`.
+#[derive(Debug, Args)]
+pub struct HistoryArgs {
+    /// Numeric listing identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub id: String,
+}
+
+/// Arguments for `saved`.
+#[derive(Debug, Args)]
+pub struct SavedArgs {
+    /// Saved-search command.
+    #[command(subcommand)]
+    pub command: SavedCommand,
+}
+
+/// Subcommands for `saved`.
+#[derive(Debug, Subcommand)]
+pub enum SavedCommand {
+    /// Store or replace a saved search.
+    Add(Box<SavedAddArgs>),
+    /// List saved searches.
+    List,
+    /// Show one saved search.
+    Show(SavedNameArgs),
+    /// Remove one saved search.
+    Remove(SavedNameArgs),
+}
+
+/// Arguments for `saved add`.
+#[derive(Debug, Args)]
+pub struct SavedAddArgs {
+    /// User-chosen name.
+    pub name: String,
+    /// Free-text query.
+    pub query: String,
+    /// Shared search filters.
+    #[command(flatten)]
+    pub filters: SearchFilters,
+    /// Watch interval: 30s, 15m or 1h.
+    #[arg(long, default_value = "15m", value_name = "DURATION")]
+    pub interval: String,
+}
+
+impl SavedAddArgs {
+    /// Converts the parsed arguments into a one-page saved query.
+    pub fn to_query(&self) -> SearchQuery {
+        let mut query = SearchQuery::new(self.query.as_str());
+        self.filters.apply(&mut query);
+        query.pages = 1;
+        query.cursor = None;
+        if query.sort.is_none() {
+            query.sort = Some(SearchSort::DateDescending);
+        }
+        query
+    }
+}
+
+/// Arguments that name one saved search.
+#[derive(Debug, Args)]
+pub struct SavedNameArgs {
+    /// Saved search name.
+    pub name: String,
+}
+
+/// Export format.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    /// One JSON object per line.
+    Jsonl,
+    /// Comma-separated rows.
+    Csv,
+}
+
+/// What an export contains.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportKind {
+    /// Recorded price points.
+    History,
+    /// Stored listings with their last observed values.
+    Listings,
+}
+
+/// Arguments for `export`.
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value = "jsonl")]
+    pub format: ExportFormat,
+
+    /// Dataset to export.
+    #[arg(long, value_enum, default_value = "history")]
+    pub kind: ExportKind,
+
+    /// Restrict the export to one listing.
+    #[arg(long, value_name = "ID", value_parser = parse_numeric_id)]
+    pub listing: Option<String>,
+
+    /// Maximum number of rows.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 10_000,
+        value_parser = clap::value_parser!(u32).range(1..=100_000)
+    )]
+    pub limit: u32,
 }
 
 /// Arguments for `get`.
@@ -426,7 +590,7 @@ pub struct SearchMetadataArgs {
 }
 
 /// Ad type accepted on the command line.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AdTypeArg {
     /// Offered ads.
     Offered,
@@ -444,7 +608,7 @@ impl From<AdTypeArg> for AdType {
 }
 
 /// Poster type accepted on the command line.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PosterTypeArg {
     /// Private sellers.
     Private,
@@ -462,7 +626,7 @@ impl From<PosterTypeArg> for PosterType {
 }
 
 /// Sort order accepted on the command line.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SortArg {
     /// Newest listings first.
     DateDescending,
@@ -759,10 +923,11 @@ mod tests {
         let Command::Watch(args) = cli.command else {
             panic!("expected watch command");
         };
-        let query = args.to_query();
+        let query = args.to_query().expect("query");
         assert_eq!(query.pages, 1);
         assert!(query.cursor.is_none());
         assert_eq!(query.sort, Some(SearchSort::DateDescending));
         assert_eq!(args.poll_limit(), 0);
+        assert!(!args.uses_state());
     }
 }

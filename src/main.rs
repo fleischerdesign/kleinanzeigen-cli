@@ -81,6 +81,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::FlagReasons => commands::flag_reasons(format).await,
         Command::SearchMetadata(args) => commands::search_metadata(args, format).await,
         Command::Watch(args) => commands::watch(args, format).await,
+        Command::History(args) => commands::history(args, format),
+        Command::Saved(args) => commands::saved(args.command, format),
+        Command::Export(args) => commands::export(args, format),
     }
 }
 

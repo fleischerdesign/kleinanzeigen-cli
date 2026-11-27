@@ -24,6 +24,10 @@
             version = "0.1.0";
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
+            # nixpkgs' cargo setup hook sets LIBSQLITE3_SYS_USE_PKG_CONFIG=1, so
+            # libsqlite3-sys links the system SQLite instead of the bundled copy.
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.sqlite ];
             meta = {
               description = "Unofficial, browser-free CLI for Kleinanzeigen";
               homepage = "https://github.com/fleischerdesign/kleinanzeigen-cli";

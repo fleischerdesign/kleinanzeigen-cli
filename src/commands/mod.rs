@@ -1,6 +1,7 @@
 //! Command implementations.
 
 mod discovery;
+mod local;
 mod reference;
 mod watch;
 
@@ -12,6 +13,7 @@ use crate::provider::mobile_api::{AppApiSettings, MobileApiProvider};
 use crate::provider::{ListingList, Provider, SearchPage};
 
 pub use discovery::{gallery, images, profile, seller_other, similar, stats, stats_batch};
+pub use local::{export, history, saved};
 pub use reference::{categories, flag_reasons, location, locations, search_metadata};
 pub use watch::watch;
 

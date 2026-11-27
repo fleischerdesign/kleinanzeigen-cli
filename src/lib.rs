@@ -27,3 +27,6 @@ pub mod output;
 
 /// The boundary between the CLI and a concrete Kleinanzeigen access path.
 pub mod provider;
+
+/// Local no-account state for watch progress, price history and saved searches.
+mod state;

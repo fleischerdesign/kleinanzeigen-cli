@@ -4,7 +4,7 @@
 
 Unofficial, browser-free CLI for [Kleinanzeigen](https://www.kleinanzeigen.de). Built in Rust for agents and humans.
 
-> **Status:** read-only public API. Search, detail, reference data, discovery, metadata, counters and `watch` work without an account. There is no account login, no cache, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
+> **Status:** read-only public API. Search, detail, reference data, discovery, metadata, counters and `watch` work without an account. Optional local SQLite state keeps watch progress, price history and saved searches; it holds public listing data only. There is no account login, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
 
 ## Why
 
@@ -106,6 +106,18 @@ kleinanzeigen stats-batch 1234567890 1234567891 --json
 # Poll new listings as one JSON event per line.
 kleinanzeigen watch "fendt bianco" --interval 15m --json
 kleinanzeigen watch "fendt bianco" --once --json
+
+# Keep watch progress and price history, then resume later.
+kleinanzeigen watch "fendt bianco" --store --interval 15m --json
+kleinanzeigen watch "fendt bianco" --resume --once --json
+kleinanzeigen history 1234567890 --json
+
+# Saved searches and local exports.
+kleinanzeigen saved add camper "fendt bianco" --max-price 20000 --interval 15m
+kleinanzeigen saved list --json
+kleinanzeigen watch --saved camper --store --json
+kleinanzeigen export --kind history --format jsonl
+kleinanzeigen export --kind listings --format csv --limit 100
 ```
 
 Search filters:
@@ -138,9 +150,19 @@ gallery paginates.
 
 `watch` uses the same filters, polls one page per interval, prints a snapshot on
 the first poll and only unseen listings afterwards, and keeps deduplication in
-memory. The interval is at least `30s`; the default is `15m`.
+memory by default. The interval is at least `30s`; the default is `15m`.
 `--max-polls` bounds the run; `--once` is a one-poll snapshot. A restart starts
-with a new snapshot because there is no cache.
+with a new snapshot unless state is used.
+
+`--store` persists seen ids and price points in the local SQLite state.
+`--resume` starts from the stored seen set without replaying the snapshot, and
+`--fresh` clears that set and starts a new snapshot. `--saved <name>` supplies
+the query, filters and interval from a saved search; filters and `--interval`
+cannot be combined with it. State is optional and local; delete the database to
+reset it.
+
+Planned, not implemented: `login`, own ads, drafts and publishing, messages,
+MCP.
 
 Planned, not implemented: `login`, own ads, drafts and publishing, messages,
 MCP.
@@ -277,6 +299,45 @@ public reporting reasons.
 The `data` object is the same listing shape as a search item. A stream failure
 stops the stream and writes the normal error object to stderr.
 
+Local state results use the same success envelope. `history` returns an array of
+price points:
+
+```json
+{
+  "schema_version": 1,
+  "data": [
+    { "seen_at": 1764246000, "amount_cents": 1250, "currency": "EUR", "price_type": "PLEASE_CONTACT" },
+    { "seen_at": 1764332400, "amount_cents": 1100, "currency": "EUR", "price_type": "SPECIFIED_AMOUNT" }
+  ]
+}
+```
+
+`saved add` and `saved show` return one saved search; `saved list` returns an
+array. `saved remove` returns `{"name":"camper","removed":true}`:
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "name": "camper",
+    "query": { "query": "fendt bianco", "max_price_cents": 2000000, "limit": 25, "pages": 1 },
+    "interval": "15m",
+    "created_at": 1764246000,
+    "last_run": null
+  }
+}
+```
+
+`export` is a streaming command: `--format jsonl` writes one object per line
+without the success envelope, and `--format csv` writes a header and rows.
+`--kind history` is the default and exports price points; `--kind listings`
+exports stored listings with their last observed values. `--listing` restricts
+either dataset to one id and `--limit` bounds the row count.
+
+```json
+{"listing_id":"1234567890","seen_at":1764246000,"amount_cents":1250,"currency":"EUR","price_type":"PLEASE_CONTACT"}
+```
+
 Errors go to stderr as structured JSON:
 
 ```json
@@ -305,7 +366,7 @@ Exit codes:
 ### Machine contract
 
 - `--json` writes exactly one JSON object to stdout per command result.
-- `watch --json` is the exception: it writes one event object per line, each with `schema_version`, `event` and `data`.
+- `watch --json` is the exception: it writes one event object per line, each with `schema_version`, `event` and `data`. `export` likewise writes bare rows, not an envelope.
 - On failure, stderr contains exactly one JSON error object; logs are suppressed in JSON mode.
 - `--help` and `--version` are plaintext and exit `0`; they are not command results.
 - Every object carries `schema_version`. It changes only when the machine contract changes, independent of the binary version.
@@ -332,10 +393,11 @@ src/
 ├── main.rs        binary entry point, exit-code mapping
 ├── lib.rs         library root, module contract
 ├── cli.rs         clap surface and the shell contract
-├── commands/      search, discovery, reference and watch commands
+├── commands/      search, discovery, reference, local state and watch commands
 ├── doctor.rs      local diagnostics
 ├── error.rs       typed errors and stable exit codes
 ├── output.rs      JSON, NDJSON and human-readable output
+├── state.rs       local SQLite: watch progress, price history, saved searches
 ├── domain/
 │   ├── image.rs   public image variants
 │   ├── listing.rs listing ids, prices, locations, categories, listings
@@ -369,8 +431,14 @@ output contract, not a serialization of internal structs.
 - No browser, no cookies and no account login for reads.
 - The app-level Basic credential is supplied through `.env.local` or the
   environment and is never committed.
-- No telemetry, no cache and no state beyond the process. `watch` keeps its seen
-  set in memory only; a restart begins with a new snapshot.
+- No telemetry and no remote cache. `watch` is stateless by default. With
+  `--store`, `--resume` or `--fresh`, the CLI keeps a local SQLite database at
+  `${XDG_STATE_HOME:-$HOME/.local/state}/kleinanzeigen-cli/state.db`; set
+  `KLEINANZEIGEN_STATE_DIR` to choose another directory. The directory is
+  `0700`, the database `0600`.
+- The state database holds public listing fields, watch seen ids, price points
+  and saved searches. It holds no credentials, cookies, tokens or raw response
+  bodies. Delete the file to reset all local state.
 - Listing output includes city, postal code, the public seller id and public
   image URLs. Exact ad coordinates, contact names and phone numbers are not
   emitted by search or get. The explicit `profile` command returns the public
@@ -411,8 +479,9 @@ The dev shell provides `cargo`, `rustc`, `rustfmt`, `clippy` and `rust-analyzer`
 
 The roadmap is ordered by evidence, not by feature count. Each step has an
 abort condition; a later step does not start on an unproven earlier one.
-The public read surface is implemented: search, detail, reference data,
-discovery, metadata, counters and `watch`. The account milestones are not.
+The public read surface and local no-account state are implemented: search,
+detail, reference data, discovery, metadata, counters, `watch`, price history,
+saved searches and export. The account milestones are not.
 
 ### 1. Access decision and transport spike
 
@@ -470,9 +539,10 @@ without an idempotency guarantee.
 ### 5. Extensions as needed
 
 Read messages first; replies are separately confirmed. `watch` is implemented
-with an interval floor and an explicit poll limit; SQLite only with a proven
-need for persistent state. Renew and delete deliberately separate. MCP only
-after a stable CLI contract.
+with an interval floor, an explicit poll limit and opt-in local state for resume,
+price history and saved searches. Renew and delete deliberately separate. The
+stdio MCP wrapper over the stable read contract is the next no-account
+extension.
 
 **Abort:** unclear cost, permission, load budget or concrete user need for the
 individual feature.

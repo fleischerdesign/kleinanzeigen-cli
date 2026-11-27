@@ -28,6 +28,10 @@ gate for the read path and the starting point for account features.
 | Loyalty top-trader badge | Gateway loyalty-service | no | 404 for a normal public seller | Omit |
 | Category ad schema | Mobile CAPI `ads/metadata/{id}.json` | no | Internal read/write schema, not a public search filter | Omit |
 | Watch | Polling the public search endpoint | yes | Unit and local-shell tests; live snapshot | Stop the stream |
+| Persistent watch state | Local SQLite, opt-in | yes | Restart/resume test | Stateless by default |
+| Price history | Local SQLite, opt-in | yes | Round-trip and price-change tests | Empty history |
+| Saved searches | Local SQLite | yes | Local-shell lifecycle test | Not found |
+| Export | Local SQLite to stdout | yes | Local-shell JSONL/CSV test | Empty output |
 | Login and session | Mobile Auth0 and account gateway | unproven | Not exercised | Stay read-only |
 | Own ads read | User-scoped mobile CAPI | unproven | Requires a user token | Omit |
 | Pause / activate | User-scoped mobile CAPI | unproven | Requires a user token | Omit |
@@ -62,19 +66,24 @@ Re-check the read path when the app or the transport changes.
 - **Request budget:** search makes one request per page, at most 10 pages, plus
   at most one category and one location lookup. Pages are fetched sequentially
   with a 500 ms pause. `gallery` follows the same page budget. `watch` polls one
-  search page per interval; the minimum interval is 30 seconds, and the seen set
-  is in memory. `stats` makes two requests; `stats-batch` makes one watchlist
-  request plus one view request per id. Reference, discovery, image, location
-  and flag-reason commands make one request each, plus a category lookup when a
-  metadata category is given by name. No concurrency and no automatic retries.
-  A 25-second timeout, a page size of at most 50 and an 8 MiB response cap. A
-  numeric `Retry-After` header is reported as `retry_after_seconds`; the caller
-  decides when to retry.
-- **State paths:** none. Settings come from the environment. There is no cache,
-  session directory or audit log yet. `.env.local` is local configuration, not
-  application state.
-- **Storage:** nothing is persisted. Responses are converted in memory and
-  written to stdout; `watch` keeps only the seen listing ids in memory.
+  search page per interval; the minimum interval is 30 seconds. Persisted and
+  saved watches add no requests beyond the same one page per poll. `stats` makes
+  two requests; `stats-batch` makes one watchlist request plus one view request
+  per id. Reference, discovery, image, location and flag-reason commands make
+  one request each, plus a category lookup when a metadata category is given by
+  name. No concurrency and no automatic retries. A 25-second timeout, a page
+  size of at most 50 and an 8 MiB response cap. A numeric `Retry-After` header
+  is reported as `retry_after_seconds`; the caller decides when to retry.
+- **State paths:** local state is opt-in and lives in
+  `${XDG_STATE_HOME:-$HOME/.local/state}/kleinanzeigen-cli/state.db`
+  (`LOCALAPPDATA` on Windows); `KLEINANZEIGEN_STATE_DIR` overrides the directory
+  for tests or portable use. The directory is `0700` and the database `0600`.
+  Settings still come from the environment. `.env.local` is local configuration,
+  not application state.
+- **Storage:** local SQLite stores public listing fields, watch seen ids, price
+  points and saved searches. It stores no credentials, cookies, tokens or raw
+  response bodies. Deleting the file resets all local state. Without `--store`,
+  `--resume`, `--fresh` or `--saved`, `watch` keeps only the seen ids in memory.
 - **Log redaction:** no `Authorization`, app install id, token, response body,
   contact data or coordinates in logs. In JSON mode logging is disabled. A
   request log line carries only the operation, HTTP status and duration.
@@ -88,7 +97,9 @@ Re-check the read path when the app or the transport changes.
   returns the public seller profile, including the public contact name,
   member-since date, badges and counters. `location` returns the public location
   tree, including approximate location coordinates, not an ad's exact position.
-  `flag-reasons` returns public reporting metadata. Nothing is cached.
+  `flag-reasons` returns public reporting metadata. There is no remote cache;
+  local state is created only by the explicit state commands and holds public
+  listing data.
 - **Kill switch:** unset `KLEINANZEIGEN_BASIC_USER` and
   `KLEINANZEIGEN_BASIC_PW`. Public commands then fail before any request with
   exit code `2`. `doctor` reports `mobile-api (missing credentials)`.

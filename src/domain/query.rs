@@ -1,11 +1,11 @@
 //! Search requests.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
 /// Provider sort order for search results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SearchSort {
     /// Newest listings first.
@@ -31,7 +31,7 @@ impl SearchSort {
 }
 
 /// The kind of ad to search for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AdType {
     /// Offered ads, the normal marketplace search.
@@ -52,7 +52,7 @@ impl AdType {
 }
 
 /// The public poster type filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PosterType {
     /// Private sellers.
@@ -72,7 +72,7 @@ impl PosterType {
 }
 
 /// A search request.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchQuery {
     /// Free-text query.
     pub query: String,
