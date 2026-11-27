@@ -68,6 +68,15 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Doctor => doctor::run(format),
         Command::Search(args) => commands::search(args, format).await,
         Command::Get(args) => commands::get(args, format).await,
+        Command::Categories(args) => commands::categories(args, format).await,
+        Command::Locations(args) => commands::locations(args, format).await,
+        Command::Similar(args) => commands::similar(args, format).await,
+        Command::SellerOther(args) => commands::seller_other(args, format).await,
+        Command::Gallery => commands::gallery(format).await,
+        Command::Profile(args) => commands::profile(args, format).await,
+        Command::Stats(args) => commands::stats(args, format).await,
+        Command::SearchMetadata(args) => commands::search_metadata(args, format).await,
+        Command::Watch(args) => commands::watch(args, format).await,
     }
 }
 

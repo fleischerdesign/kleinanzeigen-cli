@@ -23,9 +23,11 @@ use reqwest::header::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::domain::{Listing, ListingId, SearchQuery};
+use crate::domain::{
+    AdStats, CategoryRef, Listing, ListingId, LocationRef, SearchFilter, SearchQuery, SellerProfile,
+};
 use crate::error::{Error, Result};
-use crate::provider::{Provider, SearchPage};
+use crate::provider::{ListingList, Provider, SearchPage};
 
 pub use config::{AppApiSettings, BasicAuth, DEFAULT_APP_VERSION, DEFAULT_BASE_URL};
 
@@ -33,8 +35,15 @@ use transport::{HttpRequest, HttpResponse, ReqwestTransport, Transport};
 
 const SEARCH_PATH: &str = "api/ads.json";
 const DETAIL_PATH: &str = "api/ads/{id}.json";
+const SIMILAR_PATH: &str = "api/ads/similar/{id}.json";
+const SELLER_OTHER_PATH: &str = "api/ads/seller-other-ads/{id}.json";
+const GALLERY_PATH: &str = "api/ads/hp-gallery.json";
 const CATEGORIES_PATH: &str = "api/categories.json";
 const LOCATIONS_PATH: &str = "api/locations.json";
+const METADATA_PATH: &str = "api/ads/search-metadata/{id}.json";
+const PROFILE_PATH: &str = "api/users/public/{id}/profile.json";
+const VIEWS_PATH: &str = "api/v2/counters/ads/vip/{id}";
+const WATCHLIST_COUNTERS_PATH: &str = "api/v2/counters/ads/watchlist";
 const ACCEPT_LANGUAGE_VALUE: &str = "de-DE";
 const PAGE_DELAY: Duration = Duration::from_millis(500);
 
@@ -177,6 +186,8 @@ impl Provider for MobileApiProvider {
             }
         }
 
+        items.retain(|item| matches_client_filters(item, query));
+
         Ok(SearchPage {
             items,
             total,
@@ -198,6 +209,114 @@ impl Provider for MobileApiProvider {
 }
 
 impl MobileApiProvider {
+    /// Fetches the provider category tree.
+    pub async fn categories(&self) -> Result<Vec<CategoryRef>> {
+        let url = self.endpoint(CATEGORIES_PATH)?;
+        let body = self.get(url, "category lookup").await?;
+        let response: dto::CategoriesResponse = serde_json::from_slice(&body).map_err(|error| {
+            Error::Format(format!("could not parse category response: {error}"))
+        })?;
+        Ok(reference::categories(response.categories.value))
+    }
+
+    /// Fetches provider locations matching a name or postal code.
+    pub async fn locations(&self, query: &str) -> Result<Vec<LocationRef>> {
+        let mut url = self.endpoint(LOCATIONS_PATH)?;
+        url.query_pairs_mut().append_pair("q", query);
+        let body = self.get(url, "location lookup").await?;
+        let response: dto::LocationsResponse = serde_json::from_slice(&body).map_err(|error| {
+            Error::Format(format!("could not parse location response: {error}"))
+        })?;
+        Ok(reference::locations(response.locations.value))
+    }
+
+    /// Fetches the search metadata for a category.
+    pub async fn search_metadata(&self, category: &str) -> Result<Vec<SearchFilter>> {
+        let category_id = self
+            .resolve_category(Some(category))
+            .await?
+            .ok_or_else(|| Error::Input("category must not be empty".to_owned()))?;
+        let path = METADATA_PATH.replace("{id}", &category_id);
+        let url = self.endpoint(&path)?;
+        let body = self.get(url, "search metadata").await?;
+        let response: dto::SearchMetadataResponse =
+            serde_json::from_slice(&body).map_err(|error| {
+                Error::Format(format!("could not parse search metadata response: {error}"))
+            })?;
+        Ok(convert::search_metadata(response))
+    }
+
+    /// Fetches listings similar to one listing.
+    pub async fn similar(&self, id: &ListingId) -> Result<ListingList> {
+        let path = SIMILAR_PATH.replace("{id}", id.as_str());
+        self.listing_list(&path, "similar ads").await
+    }
+
+    /// Fetches other active ads from the same seller.
+    pub async fn seller_other_ads(&self, id: &ListingId) -> Result<ListingList> {
+        let path = SELLER_OTHER_PATH.replace("{id}", id.as_str());
+        self.listing_list(&path, "seller other ads").await
+    }
+
+    /// Fetches the public homepage gallery.
+    pub async fn gallery(&self) -> Result<ListingList> {
+        self.listing_list(GALLERY_PATH, "gallery").await
+    }
+
+    /// Fetches one public seller profile.
+    pub async fn profile(&self, seller_id: &str) -> Result<SellerProfile> {
+        if seller_id.is_empty()
+            || !seller_id
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            return Err(Error::Input(
+                "seller id must be a non-empty numeric string".to_owned(),
+            ));
+        }
+        let path = PROFILE_PATH.replace("{id}", seller_id);
+        let url = self.endpoint(&path)?;
+        let body = self.get(url, "seller profile").await?;
+        let response: dto::ProfileResponse = serde_json::from_slice(&body)
+            .map_err(|error| Error::Format(format!("could not parse profile response: {error}")))?;
+        convert::profile(response)
+    }
+
+    /// Fetches public view and watchlist counters for one listing.
+    pub async fn stats(&self, id: &ListingId) -> Result<AdStats> {
+        let views_path = VIEWS_PATH.replace("{id}", id.as_str());
+        let views_url = self.endpoint(&views_path)?;
+        let views_body = self.get(views_url, "view counter").await?;
+        let views_response: dto::ViewsResponse = serde_json::from_slice(&views_body)
+            .map_err(|error| Error::Format(format!("could not parse view counter: {error}")))?;
+        let views = convert::views(views_response)?;
+
+        let mut watchlist_url = self.endpoint(WATCHLIST_COUNTERS_PATH)?;
+        watchlist_url
+            .query_pairs_mut()
+            .append_pair("adIds", id.as_str());
+        let watchlist_body = self.get(watchlist_url, "watchlist counter").await?;
+        let watchlist_response: dto::WatchlistCountersResponse =
+            serde_json::from_slice(&watchlist_body).map_err(|error| {
+                Error::Format(format!("could not parse watchlist counter: {error}"))
+            })?;
+        let watchlist = convert::watchlist_count(watchlist_response, id);
+
+        Ok(AdStats {
+            id: id.clone(),
+            views,
+            watchlist,
+        })
+    }
+
+    async fn listing_list(&self, path: &str, operation: &str) -> Result<ListingList> {
+        let url = self.endpoint(path)?;
+        let body = self.get(url, operation).await?;
+        let response: dto::SearchResponse = serde_json::from_slice(&body)
+            .map_err(|error| Error::Format(format!("could not parse {operation}: {error}")))?;
+        convert::listing_list(response)
+    }
+
     async fn search_once(
         &self,
         query: &SearchQuery,
@@ -264,12 +383,7 @@ impl MobileApiProvider {
             return Ok(Some(value.to_owned()));
         }
 
-        let url = self.endpoint(CATEGORIES_PATH)?;
-        let body = self.get(url, "category lookup").await?;
-        let response: dto::CategoriesResponse = serde_json::from_slice(&body).map_err(|error| {
-            Error::Format(format!("could not parse category response: {error}"))
-        })?;
-        let categories = reference::categories(response.categories.value);
+        let categories = self.categories().await?;
         reference::resolve_category(&categories, value).map(Some)
     }
 
@@ -282,13 +396,7 @@ impl MobileApiProvider {
             return Ok(None);
         }
 
-        let mut url = self.endpoint(LOCATIONS_PATH)?;
-        url.query_pairs_mut().append_pair("q", value);
-        let body = self.get(url, "location lookup").await?;
-        let response: dto::LocationsResponse = serde_json::from_slice(&body).map_err(|error| {
-            Error::Format(format!("could not parse location response: {error}"))
-        })?;
-        let locations = reference::locations(response.locations.value);
+        let locations = self.locations(value).await?;
         reference::resolve_location(&locations, value).map(Some)
     }
 }
@@ -312,6 +420,51 @@ fn euros(cents: i64) -> String {
     } else {
         format!("{}.{:02}", cents / 100, cents % 100)
     }
+}
+
+fn matches_client_filters(listing: &Listing, query: &SearchQuery) -> bool {
+    if !query.exclude.is_empty() {
+        let haystack = format!(
+            "{}\n{}",
+            listing.title,
+            listing.description.as_deref().unwrap_or_default()
+        )
+        .to_lowercase();
+        if query
+            .exclude
+            .iter()
+            .any(|term| !term.trim().is_empty() && haystack.contains(&term.to_lowercase()))
+        {
+            return false;
+        }
+    }
+
+    if query
+        .min_rooms
+        .is_some_and(|minimum| !listing.rooms.is_some_and(|rooms| rooms >= minimum))
+    {
+        return false;
+    }
+    if query
+        .max_rooms
+        .is_some_and(|maximum| !listing.rooms.is_some_and(|rooms| rooms <= maximum))
+    {
+        return false;
+    }
+    if query
+        .min_size_m2
+        .is_some_and(|minimum| !listing.size_m2.is_some_and(|size| size >= minimum))
+    {
+        return false;
+    }
+    if query
+        .max_size_m2
+        .is_some_and(|maximum| !listing.size_m2.is_some_and(|size| size <= maximum))
+    {
+        return false;
+    }
+
+    true
 }
 
 fn handle_response(response: HttpResponse, operation: &str) -> Result<Vec<u8>> {
@@ -650,6 +803,19 @@ mod tests {
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn client_filters_remove_matching_listings() {
+        let transport = FakeTransport::new(StatusCode::OK, SEARCH_FIXTURE);
+        let provider = MobileApiProvider::with_transport(settings(), transport).expect("provider");
+        let mut query = SearchQuery::new("synthetic");
+        query.exclude = vec!["bike".to_owned()];
+
+        let page = provider.search(&query).await.expect("search page");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].title, "Synthetic lamp");
+        assert_eq!(page.total, 2);
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@
 
 Unofficial, browser-free CLI for [Kleinanzeigen](https://www.kleinanzeigen.de). Built in Rust for agents and humans.
 
-> **Status:** read-only. `get` and `search` use the mobile API; there is no account login, no cache, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
+> **Status:** read-only public API. Search, detail, reference data, discovery, metadata, counters and `watch` work without an account. There is no account login, no cache, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
 
 ## Why
 
@@ -53,8 +53,8 @@ KLEINANZEIGEN_BASIC_PW=...
 ```
 
 `direnv` loads `.env.local` through `.envrc`; a plain shell needs the variables
-exported. The credential can change when the app updates. If it does, `get` and
-`search` fail with exit code `4` and a message to update the two values.
+exported. The credential can change when the app updates. If it does, the public
+commands fail with exit code `4` and a message to update the two values.
 
 Optional overrides:
 
@@ -86,6 +86,22 @@ kleinanzeigen search "fahrrad" --pages 2 --limit 25 --json
 
 # Fetch one listing.
 kleinanzeigen get 1234567890 --json
+
+# Public reference data and discovery.
+kleinanzeigen categories "Fahrräder" --json
+kleinanzeigen locations Berlin --json
+kleinanzeigen search-metadata "Fahrräder & Zubehör" --json
+kleinanzeigen similar 1234567890 --json
+kleinanzeigen seller-other 1234567890 --json
+kleinanzeigen gallery --json
+
+# Public seller and counter data.
+kleinanzeigen profile 123456 --json
+kleinanzeigen stats 1234567890 --json
+
+# Poll new listings as one JSON event per line.
+kleinanzeigen watch "fendt bianco" --interval 15m --json
+kleinanzeigen watch "fendt bianco" --once --json
 ```
 
 Search filters:
@@ -97,6 +113,9 @@ Search filters:
 - `--radius <KM>`, `--min-price <EUROS>`, `--max-price <EUROS>`
 - `--ad-type <offered|wanted>` — default `offered`.
 - `--picture-required`, `--buy-now-only`, `--include-top-ads`
+- `--exclude <TERM>` — repeatable, filters title and description after the fetch.
+- `--min-rooms <N>`, `--max-rooms <N>`, `--min-size <M2>`, `--max-size <M2>`
+  — client-side filters over provider attributes; missing values are excluded.
 - `--limit <1-50>`, `--pages <1-10>`, `--cursor <CURSOR>`
 - `--sort <date-descending|price-ascending|price-descending|distance-ascending>`
 
@@ -104,9 +123,22 @@ Prices are decimal euros, not floats in the shell. Category and location names
 cost one lookup request each; numeric ids skip it. Multi-page searches fetch
 sequentially with a short delay and deduplicate listings by id.
 `--include-top-ads` may add paid top ads beyond the configured page size.
+Client-side filters affect `items`, not the provider's `total`.
 
-Planned, not implemented: `watch`, `login`, own ads, drafts and publishing,
-messages, MCP.
+`watch` uses the same filters, polls one page per interval, prints a snapshot on
+the first poll and only unseen listings afterwards, and keeps deduplication in
+memory. The interval is at least `30s`; the default is `15m`.
+`--max-polls` bounds the run; `--once` is a one-poll snapshot. A restart starts
+with a new snapshot because there is no cache.
+
+Planned, not implemented: `login`, own ads, drafts and publishing, messages,
+MCP.
+
+The public read surface covers search, detail, reference data, discovery,
+metadata, public counters and `watch`. Commercial imprint, reporting/flags,
+manufacturer catalogue and loyalty badges are intentionally not part of the
+CLI. `search-metadata` reports category filters; arbitrary dynamic `attr`
+queries are not sent because their encoding is unverified.
 
 ## JSON contract
 
@@ -152,6 +184,9 @@ One search result:
         "ad_type": "OFFERED",
         "poster_type": "PRIVATE",
         "category": { "id": "87", "name": "Synthetic category" },
+        "seller_id": null,
+        "rooms": null,
+        "size_m2": null,
         "images": ["https://img.example.invalid/synthetic-bike-large.jpg"],
         "attributes": [
           { "name": "synthetic.condition", "label": "Condition", "value": "Good" }
@@ -167,8 +202,47 @@ One search result:
 }
 ```
 
-`get` returns one listing object in `data`. Errors go to stderr as structured
-JSON:
+`get` returns one listing object in `data`. `categories` and `locations` return
+arrays in `data`; `search-metadata` returns an array of filters.
+
+A public seller profile:
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "id": "123456",
+    "name": "Synthetic Seller",
+    "since": "2020-01-01",
+    "poster_type": "PRIVATE",
+    "initials": "SS",
+    "historical_ads": 3,
+    "online_ads": 2,
+    "reply_speed": "3h",
+    "badges": [{ "name": "rating", "level": 2, "value": null }],
+    "secure_payment": true,
+    "seller_account_type": "private"
+  }
+}
+```
+
+Public counters:
+
+```json
+{"schema_version":1,"data":{"id":"1234567890","views":7,"watchlist":2}}
+```
+
+`watch` emits newline-delimited JSON, one object per line:
+
+```json
+{"schema_version":1,"event":"snapshot","data":{"id":"1234567890"}}
+{"schema_version":1,"event":"new","data":{"id":"1234567891"}}
+```
+
+The `data` object is the same listing shape as a search item. A stream failure
+stops the stream and writes the normal error object to stderr.
+
+Errors go to stderr as structured JSON:
 
 ```json
 {"schema_version":1,"error":{"code":"invalid_input","message":"invalid input: listing id must be a non-empty numeric string"}}
@@ -196,14 +270,16 @@ Exit codes:
 ### Machine contract
 
 - `--json` writes exactly one JSON object to stdout per command result.
+- `watch --json` is the exception: it writes one event object per line, each with `schema_version`, `event` and `data`.
 - On failure, stderr contains exactly one JSON error object; logs are suppressed in JSON mode.
 - `--help` and `--version` are plaintext and exit `0`; they are not command results.
 - Every object carries `schema_version`. It changes only when the machine contract changes, independent of the binary version.
 - Search pages carry `total`, `page`, `size`, `pages_fetched` and `next_cursor`. The cursor is opaque: pass it back as `--cursor`.
 - With `--pages > 1`, `items` is the deduplicated union of the fetched pages; `size` remains the per-page size and `pages_fetched` says how many pages were actually fetched.
-- `posted_at` is an RFC 3339 string or `null`.
+- Client-side filters (`--exclude`, rooms, size) affect `items`; `total` remains the provider's total.
+- `posted_at` is an RFC 3339 string or `null`. `rooms` and `size_m2` are numbers or `null`.
+- `seller_id` is the public numeric seller identifier; use it with `profile`.
 - `retry_after_seconds` appears only when the provider sent a numeric `Retry-After` header.
-- `watch` will emit newline-delimited JSON (one event per line) with the same `schema_version`; a stream failure ends with the error object.
 
 ## Supported platforms
 
@@ -220,15 +296,18 @@ src/
 ├── main.rs        binary entry point, exit-code mapping
 ├── lib.rs         library root, module contract
 ├── cli.rs         clap surface and the shell contract
-├── commands/      search and get implementations
+├── commands/      search, discovery, reference and watch commands
 ├── doctor.rs      local diagnostics
 ├── error.rs       typed errors and stable exit codes
-├── output.rs      JSON and human-readable output
+├── output.rs      JSON, NDJSON and human-readable output
 ├── domain/
 │   ├── listing.rs listing ids, prices, locations, categories, listings
-│   └── query.rs   search requests and sort order
+│   ├── profile.rs public seller profiles and badges
+│   ├── query.rs   search requests and sort order
+│   ├── reference.rs categories, locations and search filters
+│   └── stats.rs   public listing counters
 └── provider/
-    ├── mod.rs     Provider trait and search page
+    ├── mod.rs     Provider trait, search page and listing list
     └── mobile_api/
         ├── mod.rs        endpoint and HTTP orchestration
         ├── config.rs     environment settings and app Basic auth
@@ -253,15 +332,23 @@ output contract, not a serialization of internal structs.
 - No browser, no cookies and no account login for reads.
 - The app-level Basic credential is supplied through `.env.local` or the
   environment and is never committed.
-- No telemetry, no cache and no state beyond the process.
-- Exact coordinates, contact names, phone numbers and account identifiers are
-  intentionally not emitted; the CLI exposes city, postal code, listing data and
-  public image URLs.
+- No telemetry, no cache and no state beyond the process. `watch` keeps its seen
+  set in memory only; a restart begins with a new snapshot.
+- Listing output includes city, postal code, the public seller id and public
+  image URLs. Exact coordinates, contact names and phone numbers are not emitted
+  by search or get. The explicit `profile` command returns the public seller
+  profile, including the public contact name, member-since date, badges and
+  counters.
 - Logs never contain `Authorization`, the app install id, tokens or response
   bodies. JSON mode suppresses logs entirely.
-- One request per page, at most 10 pages per search, plus at most one category
-  and one location lookup. Pages are fetched sequentially with a 500 ms pause.
-  No automatic retries, a 25-second timeout, a maximum page size of 50 and an
+- Search: one request per page, at most 10 pages, plus at most one category and
+  one location lookup; pages are fetched sequentially with a 500 ms pause.
+- `watch`: one search request per poll, with name lookups when needed, at an
+  interval of at least 30 seconds; one page per poll.
+- `stats` makes two requests; `categories`, `locations`, `similar`,
+  `seller-other`, `gallery`, `profile` and `search-metadata` make one request
+  each, plus a category lookup for a metadata name.
+- No automatic retries, a 25-second timeout, a maximum page size of 50 and an
   8 MiB response cap. A numeric `Retry-After` header is surfaced as
   `retry_after_seconds`.
 
@@ -284,7 +371,8 @@ The dev shell provides `cargo`, `rustc`, `rustfmt`, `clippy` and `rust-analyzer`
 
 The roadmap is ordered by evidence, not by feature count. Each step has an
 abort condition; a later step does not start on an unproven earlier one.
-Milestones 1 and 2 are implemented for the read path; later milestones are not.
+The public read surface is implemented: search, detail, reference data,
+discovery, metadata, counters and `watch`. The account milestones are not.
 
 ### 1. Access decision and transport spike
 
@@ -300,7 +388,7 @@ Do not build the rest on it.
 **Risk:** the mobile API is private and can change with app updates. Record
 that dependency explicitly; do not present it as a public contract.
 
-**Not included:** login, live mutations, `watch`, SQLite.
+**Not included:** login, live mutations, SQLite.
 
 ### 2. Usable read release
 
@@ -311,7 +399,8 @@ synthetic tests and Nix package with this scope.
 **Abort:** `get` is not reliably interpretable. If only `search` is unstable,
 ship `get` alone.
 
-**Not included:** `watch`, SQLite, account features, release automation.
+**Not included:** SQLite, account features, release automation. `watch` is
+implemented with a bounded polling budget.
 
 ### 3. Session and own ads read
 
@@ -340,9 +429,10 @@ without an idempotency guarantee.
 
 ### 5. Extensions as needed
 
-Read messages first; replies are separately confirmed. `watch` only with a
-viable polling budget; SQLite only with a proven need for persistent state.
-Renew and delete deliberately separate. MCP only after a stable CLI contract.
+Read messages first; replies are separately confirmed. `watch` is implemented
+with an interval floor and an explicit poll limit; SQLite only with a proven
+need for persistent state. Renew and delete deliberately separate. MCP only
+after a stable CLI contract.
 
 **Abort:** unclear cost, permission, load budget or concrete user need for the
 individual feature.

@@ -10,7 +10,7 @@ use crate::error::Result;
 pub mod mobile_api;
 
 /// One page of search results.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchPage {
     /// Listings on this page.
     pub items: Vec<Listing>,
@@ -24,6 +24,15 @@ pub struct SearchPage {
     pub pages_fetched: u32,
     /// Cursor for the next page, if any.
     pub next_cursor: Option<String>,
+}
+
+/// A bounded list of listings that is not a search page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ListingList {
+    /// Listings returned by the provider.
+    pub items: Vec<Listing>,
+    /// Total number reported by the provider, if any.
+    pub total: u64,
 }
 
 /// Read access to Kleinanzeigen.

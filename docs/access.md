@@ -8,8 +8,16 @@ gate for the read path and the starting point for account features.
 
 | Function | Access | Supported | Evidence | Fallback |
 | --- | --- | --- | --- | --- |
-| Detail read | Mobile CAPI `GET /api/ads/{id}.json` | yes | Synthetic `tests/fixtures/detail.json`; live check with ordinary HTTPS | Fail closed |
-| Search read | Mobile CAPI `GET /api/ads.json` | yes | Synthetic `tests/fixtures/search.json`; live check with ordinary HTTPS | Fail closed |
+| Detail read | Mobile CAPI `GET /api/ads/{id}.json` | yes | Synthetic `tests/fixtures/detail.json`; live check | Fail closed |
+| Search read | Mobile CAPI `GET /api/ads.json` | yes | Synthetic `tests/fixtures/search.json`; live check | Fail closed |
+| Categories and locations | Mobile CAPI `categories.json`, `locations.json` | yes | Synthetic reference tests; live check | Fail closed |
+| Search metadata | Mobile CAPI `ads/search-metadata/{category}.json` | yes | Synthetic metadata test; live check | Fail closed |
+| Similar ads | Mobile CAPI `ads/similar/{id}.json` | yes | Live check; same ads block as search | Fail closed |
+| Seller other ads | Mobile CAPI `ads/seller-other-ads/{id}.json` | yes | Live check | Fail closed |
+| Homepage gallery | Mobile CAPI `ads/hp-gallery.json` | yes | Live check | Fail closed |
+| Public seller profile | Mobile CAPI `users/public/{id}/profile.json` | yes | Synthetic profile test; live check | Fail closed |
+| Public counters | Mobile CAPI view and watchlist counters | yes | Synthetic counter test; live check | Fail closed |
+| Watch | Polling the public search endpoint | yes | Unit and local-shell tests; live snapshot | Stop the stream |
 | Login and session | Mobile Auth0 and account gateway | unproven | Not exercised | Stay read-only |
 | Own ads read | User-scoped mobile CAPI | unproven | Requires a user token | Omit |
 | Pause / activate | User-scoped mobile CAPI | unproven | Requires a user token | Omit |
@@ -23,10 +31,15 @@ documented endpoint, or a reproducible command — not a claim from memory.
 `Fallback` says what the CLI does when the access is unavailable: fail closed,
 stay read-only, or omit the command.
 
-The read path uses the app-level Basic credential and the app headers only. It
-does not use a user account, cookies or browser automation. The credential is
-supplied by the operator through `KLEINANZEIGEN_BASIC_USER` and
+The public read path uses the app-level Basic credential and the app headers
+only. It does not use a user account, cookies or browser automation. The
+credential is supplied by the operator through `KLEINANZEIGEN_BASIC_USER` and
 `KLEINANZEIGEN_BASIC_PW`; it is not part of this repository.
+
+Commercial imprint, reporting/flags, manufacturer catalogue and loyalty badge
+endpoints are public but outside the CLI's discovery surface. They are omitted
+rather than guessed at. `search-metadata` exposes category filters, but
+arbitrary dynamic `attr` query encoding is unverified and not sent.
 
 The mobile API is private and its app version is a moving dependency. The
 default is `2026.25.0` and can be overridden with `KLEINANZEIGEN_APP_VERSION`.
@@ -34,17 +47,20 @@ Re-check the read path when the app or the transport changes.
 
 ## Operating decisions
 
-- **Request budget:** one request per page, at most 10 pages per search, plus at
-  most one category and one location lookup. Pages are fetched sequentially with
-  a 500 ms pause; no concurrency and no automatic retries. A 25-second request
-  timeout, a page size of at most 50 and an 8 MiB response cap. A numeric
-  `Retry-After` header is reported as `retry_after_seconds`; the caller decides
-  when to retry.
+- **Request budget:** search makes one request per page, at most 10 pages, plus
+  at most one category and one location lookup. Pages are fetched sequentially
+  with a 500 ms pause. `watch` polls one search page per interval; the minimum
+  interval is 30 seconds, and the seen set is in memory. `stats` makes two
+  requests. Reference, discovery and metadata commands make one request, plus a
+  category lookup when a metadata category is given by name. No concurrency and
+  no automatic retries. A 25-second timeout, a page size of at most 50 and an
+  8 MiB response cap. A numeric `Retry-After` header is reported as
+  `retry_after_seconds`; the caller decides when to retry.
 - **State paths:** none. Settings come from the environment. There is no cache,
   session directory or audit log yet. `.env.local` is local configuration, not
   application state.
 - **Storage:** nothing is persisted. Responses are converted in memory and
-  written to stdout.
+  written to stdout; `watch` keeps only the seen listing ids in memory.
 - **Log redaction:** no `Authorization`, app install id, token, response body,
   contact data or coordinates in logs. In JSON mode logging is disabled. A
   request log line carries only the operation, HTTP status and duration.
@@ -52,12 +68,13 @@ Re-check the read path when the app or the transport changes.
   shared app value, not a user token. User sessions are not implemented. A later
   login must use the OS keyring or an explicitly protected file for headless
   use.
-- **Data minimization:** exact coordinates, contact names, phone numbers and
-  account identifiers are not emitted. The CLI exposes listing id, title,
-  public URL, price, city, postal code, description, timestamps, status,
-  category, public image URLs and labeled attributes.
+- **Data minimization:** search and get do not emit exact coordinates, contact
+  names or phone numbers. They emit the public seller id, city, postal code,
+  listing data and public image URLs. The explicit `profile` command returns the
+  public seller profile, including the public contact name, member-since date,
+  badges and counters. Nothing is cached.
 - **Kill switch:** unset `KLEINANZEIGEN_BASIC_USER` and
-  `KLEINANZEIGEN_BASIC_PW`. `get` and `search` then fail before any request with
+  `KLEINANZEIGEN_BASIC_PW`. Public commands then fail before any request with
   exit code `2`. `doctor` reports `mobile-api (missing credentials)`.
 - **Security review:** required before the first real user token and before the
   first live mutation, not only before messages.

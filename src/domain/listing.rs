@@ -144,7 +144,7 @@ pub struct Attribute {
 }
 
 /// A classified listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Listing {
     /// Listing identifier.
     pub id: ListingId,
@@ -172,6 +172,12 @@ pub struct Listing {
     pub poster_type: Option<String>,
     /// Category, if available.
     pub category: Option<Category>,
+    /// Public numeric seller identifier.
+    pub seller_id: Option<String>,
+    /// Number of rooms, if the provider exposes a numeric room attribute.
+    pub rooms: Option<f64>,
+    /// Living area in square metres, if the provider exposes it.
+    pub size_m2: Option<f64>,
     /// Public image URLs, largest variant first.
     pub images: Vec<Url>,
     /// Provider attributes with their human-readable labels.

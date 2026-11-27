@@ -52,7 +52,7 @@ impl AdType {
 }
 
 /// A search request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchQuery {
     /// Free-text query.
     pub query: String,
@@ -84,6 +84,16 @@ pub struct SearchQuery {
     pub pages: u32,
     /// Opaque cursor returned by a previous page.
     pub cursor: Option<String>,
+    /// Client-side terms excluded from title and description.
+    pub exclude: Vec<String>,
+    /// Minimum number of rooms, if the listing exposes one.
+    pub min_rooms: Option<f64>,
+    /// Maximum number of rooms, if the listing exposes one.
+    pub max_rooms: Option<f64>,
+    /// Minimum living area in square metres.
+    pub min_size_m2: Option<f64>,
+    /// Maximum living area in square metres.
+    pub max_size_m2: Option<f64>,
 }
 
 impl SearchQuery {
@@ -117,6 +127,34 @@ impl SearchQuery {
             if minimum > maximum {
                 return Err(Error::Input(
                     "minimum price must not exceed maximum price".to_owned(),
+                ));
+            }
+        }
+
+        for (name, value) in [
+            ("minimum rooms", self.min_rooms),
+            ("maximum rooms", self.max_rooms),
+            ("minimum size", self.min_size_m2),
+            ("maximum size", self.max_size_m2),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                return Err(Error::Input(format!(
+                    "{name} must be a finite non-negative number"
+                )));
+            }
+        }
+
+        if let (Some(minimum), Some(maximum)) = (self.min_rooms, self.max_rooms) {
+            if minimum > maximum {
+                return Err(Error::Input(
+                    "minimum rooms must not exceed maximum rooms".to_owned(),
+                ));
+            }
+        }
+        if let (Some(minimum), Some(maximum)) = (self.min_size_m2, self.max_size_m2) {
+            if minimum > maximum {
+                return Err(Error::Input(
+                    "minimum size must not exceed maximum size".to_owned(),
                 ));
             }
         }
@@ -203,6 +241,11 @@ impl Default for SearchQuery {
             limit: 25,
             pages: 1,
             cursor: None,
+            exclude: Vec::new(),
+            min_rooms: None,
+            max_rooms: None,
+            min_size_m2: None,
+            max_size_m2: None,
         }
     }
 }
@@ -220,6 +263,9 @@ mod tests {
         assert!(!query.picture_required);
         assert!(!query.buy_now_only);
         assert!(!query.include_top_ads);
+        assert!(query.exclude.is_empty());
+        assert!(query.min_rooms.is_none());
+        assert!(query.max_size_m2.is_none());
     }
 
     #[test]
@@ -246,6 +292,17 @@ mod tests {
         query.pages = 1;
         query.min_price_cents = Some(100);
         query.max_price_cents = Some(99);
+        assert!(query.validate().is_err());
+
+        query.min_price_cents = None;
+        query.max_price_cents = None;
+        query.min_rooms = Some(3.0);
+        query.max_rooms = Some(2.0);
+        assert!(query.validate().is_err());
+
+        query.min_rooms = None;
+        query.max_rooms = None;
+        query.min_size_m2 = Some(-1.0);
         assert!(query.validate().is_err());
     }
 

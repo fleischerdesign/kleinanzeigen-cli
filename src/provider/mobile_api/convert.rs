@@ -4,12 +4,17 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
 
-use crate::domain::{Attribute, Category, Listing, ListingId, Location, Price};
+use crate::domain::{
+    Attribute, Category, FilterValue, Listing, ListingId, Location, Price, SearchFilter,
+    SellerBadge, SellerProfile,
+};
 use crate::error::{Error, Result};
-use crate::provider::SearchPage;
+use crate::provider::{ListingList, SearchPage};
 
 use super::dto::{
-    Ad, Attribute as AttributeDto, DetailResponse, Link, OneOrMany, SearchResponse, Value,
+    Ad, Attribute as AttributeDto, DetailResponse, FlexibleString, Link, OneOrMany,
+    ProfileResponse, SearchMetadataResponse, SearchResponse, Value, ViewsResponse,
+    WatchlistCountersResponse,
 };
 use super::html;
 
@@ -48,6 +53,15 @@ pub(crate) fn search_page(response: SearchResponse, page: u32, size: u32) -> Res
     })
 }
 
+/// Converts a discovery response into a bounded listing list.
+pub(crate) fn listing_list(response: SearchResponse) -> Result<ListingList> {
+    let page = search_page(response, 1, 0)?;
+    Ok(ListingList {
+        items: page.items,
+        total: page.total,
+    })
+}
+
 /// Converts a detail response into a listing.
 pub(crate) fn detail(response: DetailResponse) -> Result<Listing> {
     ad_to_listing(response.ad.value)
@@ -69,6 +83,7 @@ fn ad_to_listing(ad: Ad) -> Result<Listing> {
         pictures,
         attributes,
         negotiation_enabled,
+        user_id,
     } = ad;
 
     let id_value = id
@@ -84,7 +99,7 @@ fn ad_to_listing(ad: Ad) -> Result<Listing> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| invalid(format!("listing {id_value} has no title")))?;
 
-    let url = public_url(link)?;
+    let url = public_url(link, &id_value)?;
     let price_type = price
         .as_ref()
         .and_then(|price| price.price_type.as_ref())
@@ -108,6 +123,7 @@ fn ad_to_listing(ad: Ad) -> Result<Listing> {
         .map(|value| parse_timestamp(&value, &id_value))
         .transpose()?;
     let category = category_from_dto(category);
+    let (rooms, size_m2) = rooms_and_size(attributes.as_ref());
     let images = images_from_dto(pictures)?;
     let attributes = attributes_from_dto(attributes);
 
@@ -124,12 +140,15 @@ fn ad_to_listing(ad: Ad) -> Result<Listing> {
         ad_type: text_value(ad_type),
         poster_type: text_value(poster_type),
         category,
+        seller_id: text_value(user_id),
+        rooms,
+        size_m2,
         images,
         attributes,
     })
 }
 
-fn public_url(link: Option<OneOrMany<Link>>) -> Result<Url> {
+fn public_url(link: Option<OneOrMany<Link>>, id: &str) -> Result<Url> {
     let links = link.map(OneOrMany::into_vec).unwrap_or_default();
     let href = links
         .iter()
@@ -139,7 +158,8 @@ fn public_url(link: Option<OneOrMany<Link>>) -> Result<Url> {
     match href {
         Some(href) => Url::parse(&href)
             .map_err(|error| invalid(format!("invalid public listing URL: {error}"))),
-        None => Err(invalid("listing has no public website URL")),
+        None => Url::parse(&format!("https://www.kleinanzeigen.de/s-anzeige/{id}"))
+            .map_err(|error| invalid(format!("invalid fallback listing URL: {error}"))),
     }
 }
 
@@ -289,9 +309,182 @@ fn attribute_from_dto(attribute: AttributeDto) -> Option<Attribute> {
     }
 }
 
+/// Converts a public seller profile.
+pub(crate) fn profile(response: ProfileResponse) -> Result<SellerProfile> {
+    let id = response
+        .id
+        .ok_or_else(|| invalid("seller profile has no id"))?
+        .into_string();
+    if id.is_empty() {
+        return Err(invalid("seller profile has an empty id"));
+    }
+
+    let (historical_ads, online_ads) = response
+        .counters
+        .map(|counters| (counters.historical_ads, counters.online_ads))
+        .unwrap_or((None, None));
+    let badges = response
+        .user_badges
+        .and_then(|badges| badges.badges)
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|badge| {
+            let name = text_plain(badge.name)?;
+            Some(SellerBadge {
+                name,
+                level: badge.level,
+                value: text_plain(badge.value),
+            })
+        })
+        .collect();
+
+    Ok(SellerProfile {
+        id,
+        name: text_plain(response.contact_name),
+        since: text_plain(response.user_since),
+        poster_type: text_plain(response.poster_type),
+        initials: text_plain(response.initials),
+        historical_ads,
+        online_ads,
+        reply_speed: response
+            .reply_indicators
+            .and_then(|indicators| indicators.reply_speed)
+            .and_then(|value| text_plain(Some(value))),
+        badges,
+        secure_payment: response.secure_payment.unwrap_or(false),
+        seller_account_type: text_plain(response.seller_account_type),
+    })
+}
+
+/// Converts category search metadata into stable filters.
+pub(crate) fn search_metadata(response: SearchMetadataResponse) -> Vec<SearchFilter> {
+    let mut filters = response
+        .options
+        .value
+        .into_iter()
+        .map(|(name, filter)| {
+            let values = filter
+                .supported_value
+                .map(OneOrMany::into_vec)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|entry| {
+                    let value = entry
+                        .value
+                        .map(FlexibleString::into_string)
+                        .filter(|value| !value.is_empty())?;
+                    Some(FilterValue {
+                        value,
+                        label: text_plain(entry.localized_label),
+                    })
+                })
+                .collect();
+
+            SearchFilter {
+                name,
+                label: text_plain(filter.label),
+                kind: text_plain(filter.kind),
+                search_param: text_plain(filter.search_param),
+                deprecated: filter
+                    .deprecated
+                    .map(|deprecated| deprecated.is_true())
+                    .unwrap_or(false),
+                values,
+            }
+        })
+        .collect::<Vec<_>>();
+    filters.sort_by(|left, right| left.name.cmp(&right.name));
+    filters
+}
+
+/// Reads the view count.
+pub(crate) fn views(response: ViewsResponse) -> Result<u64> {
+    response
+        .value
+        .ok_or_else(|| invalid("view counter has no value"))
+}
+
+/// Finds one listing's watchlist count in a counter response.
+pub(crate) fn watchlist_count(response: WatchlistCountersResponse, id: &ListingId) -> Option<u64> {
+    response
+        .counters
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|counter| {
+            counter
+                .ad_id
+                .as_ref()
+                .is_some_and(|counter_id| counter_id.to_plain_string() == id.as_str())
+        })
+        .and_then(|counter| counter.value)
+}
+
+fn rooms_and_size(attributes: Option<&super::dto::Attributes>) -> (Option<f64>, Option<f64>) {
+    let Some(attributes) = attributes.and_then(|attributes| attributes.attribute.as_ref()) else {
+        return (None, None);
+    };
+    let attributes = match attributes {
+        OneOrMany::One(attribute) => std::slice::from_ref(attribute),
+        OneOrMany::Many(attributes) => attributes.as_slice(),
+    };
+
+    let mut rooms = None;
+    let mut size_m2 = None;
+    for attribute in attributes {
+        let Some(name) = attribute.name.as_deref() else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        if rooms.is_none() && name.ends_with(".zimmer") {
+            rooms = attribute_number(attribute);
+        } else if size_m2.is_none() && name.ends_with(".qm") {
+            size_m2 = attribute_number(attribute);
+        }
+    }
+
+    (rooms, size_m2)
+}
+
+fn attribute_number(attribute: &AttributeDto) -> Option<f64> {
+    let values = attribute.value.as_ref()?;
+    let first = match values {
+        OneOrMany::One(value) => value,
+        OneOrMany::Many(values) => values.first()?,
+    };
+
+    if let Some(value) = &first.value {
+        if let Some(number) = parse_number(&value.to_plain_string()) {
+            return Some(number);
+        }
+    }
+    first.localized_label.as_deref().and_then(parse_number)
+}
+
+fn parse_number(value: &str) -> Option<f64> {
+    let normalized = value.trim().replace(',', ".");
+    let numeric = normalized
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_digit() || *character == '.' || *character == '-'
+        })
+        .collect::<String>();
+    numeric
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
 fn text_value(value: Option<Value<String>>) -> Option<String> {
     value
         .and_then(|value| value.value)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn text_plain(value: Option<String>) -> Option<String> {
+    value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
@@ -372,6 +565,112 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert!(page.items[0].price.is_none());
         assert_eq!(page.items[0].price_type.as_deref(), Some("PLEASE_CONTACT"));
+    }
+
+    #[test]
+    fn extracts_rooms_and_size_and_uses_a_url_fallback() {
+        let json = r#"{
+            "{http://www.ebayclassifiedsgroup.com/schema/ad/v1}ads": {
+                "value": {
+                    "ad": {
+                        "id": "1234567890",
+                        "title": { "value": "Synthetic apartment" },
+                        "attributes": {
+                            "attribute": [
+                                {
+                                    "name": "wohnung_mieten.zimmer",
+                                    "value": [{ "value": "2,5" }]
+                                },
+                                {
+                                    "name": "wohnung_mieten.qm",
+                                    "value": [{ "value": "75,5" }]
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let response: SearchResponse = serde_json::from_str(json).expect("valid response");
+        let page = search_page(response, 1, 1).expect("search page");
+        let listing = &page.items[0];
+        assert_eq!(listing.rooms, Some(2.5));
+        assert_eq!(listing.size_m2, Some(75.5));
+        assert_eq!(
+            listing.url.as_str(),
+            "https://www.kleinanzeigen.de/s-anzeige/1234567890"
+        );
+    }
+
+    #[test]
+    fn converts_a_synthetic_profile() {
+        let json = r#"{
+            "id": "42",
+            "contactName": "Synthetic Seller",
+            "userSince": "2020-01-01",
+            "posterType": "PRIVATE",
+            "initials": "SS",
+            "counters": { "historicalAds": 3, "onlineAds": 2 },
+            "replyIndicators": { "replySpeed": "3h" },
+            "userBadges": {
+                "badges": [
+                    { "name": "rating", "level": 2, "value": "good" }
+                ]
+            },
+            "securePayment": true,
+            "sellerAccountType": "private"
+        }"#;
+        let response: ProfileResponse = serde_json::from_str(json).expect("valid profile");
+        let profile = profile(response).expect("profile conversion");
+        assert_eq!(profile.id, "42");
+        assert_eq!(profile.name.as_deref(), Some("Synthetic Seller"));
+        assert_eq!(profile.historical_ads, Some(3));
+        assert_eq!(profile.online_ads, Some(2));
+        assert_eq!(profile.reply_speed.as_deref(), Some("3h"));
+        assert_eq!(profile.badges.len(), 1);
+        assert!(profile.secure_payment);
+    }
+
+    #[test]
+    fn converts_sorted_search_metadata() {
+        let json = r#"{
+            "{http://www.ebayclassifiedsgroup.com/schema/ad/v1}ads-search-options": {
+                "value": {
+                    "price": {
+                        "localized-label": "Price",
+                        "type": "STRING",
+                        "deprecated": "false"
+                    },
+                    "adType": {
+                        "localized-label": "Type",
+                        "type": "ENUM",
+                        "search-param": "optional",
+                        "supported-value": [
+                            { "value": "OFFERED", "localized-label": "Offer" },
+                            { "value": "WANTED", "localized-label": "Want" }
+                        ],
+                        "deprecated": "false"
+                    }
+                }
+            }
+        }"#;
+        let response: SearchMetadataResponse = serde_json::from_str(json).expect("valid metadata");
+        let filters = search_metadata(response);
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].name, "adType");
+        assert_eq!(filters[0].values.len(), 2);
+        assert_eq!(filters[1].name, "price");
+    }
+
+    #[test]
+    fn reads_view_and_watchlist_counters() {
+        let views_response: ViewsResponse = serde_json::from_str(r#"{"value": 7}"#).expect("views");
+        assert_eq!(views(views_response).expect("view count"), 7);
+
+        let counters: WatchlistCountersResponse =
+            serde_json::from_str(r#"{"counters":[{"adId":"123","value":2}]}"#).expect("counters");
+        let id = ListingId::new("123").expect("id");
+        assert_eq!(watchlist_count(counters, &id), Some(2));
     }
 
     #[test]

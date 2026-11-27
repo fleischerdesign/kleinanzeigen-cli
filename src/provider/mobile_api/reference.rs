@@ -6,25 +6,10 @@
 
 use std::collections::HashSet;
 
+use crate::domain::{CategoryRef, LocationRef};
 use crate::error::{Error, Result};
 
 use super::dto::{CategoryNode, CategoryRoot, FlexibleString, LocationNode, LocationRoot};
-
-/// One category in the flattened provider tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CategoryRef {
-    id: String,
-    name: String,
-    path: String,
-}
-
-/// One location in the flattened provider tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LocationRef {
-    id: String,
-    name: String,
-    label: String,
-}
 
 /// Flattens the category response into leaf and branch categories.
 pub(crate) fn categories(root: CategoryRoot) -> Vec<CategoryRef> {

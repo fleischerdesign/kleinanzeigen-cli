@@ -1,11 +1,19 @@
 //! Command implementations.
 
+mod discovery;
+mod reference;
+mod watch;
+
 use crate::cli::{GetArgs, SearchArgs};
 use crate::domain::{Listing, ListingId, Price, SearchQuery};
 use crate::error::Result;
 use crate::output::{Format, write_json};
-use crate::provider::Provider;
 use crate::provider::mobile_api::{AppApiSettings, MobileApiProvider};
+use crate::provider::{ListingList, Provider};
+
+pub use discovery::{gallery, profile, seller_other, similar, stats};
+pub use reference::{categories, locations, search_metadata};
+pub use watch::watch;
 
 /// Searches listings and writes the result.
 pub async fn search(args: SearchArgs, format: Format) -> Result<()> {
@@ -65,9 +73,22 @@ pub async fn get(args: GetArgs, format: Format) -> Result<()> {
     }
 }
 
-fn provider() -> Result<MobileApiProvider> {
+pub(crate) fn provider() -> Result<MobileApiProvider> {
     let settings = AppApiSettings::from_env()?;
     MobileApiProvider::new(settings)
+}
+
+pub(crate) fn print_listing_list(list: &ListingList) {
+    println!("{} result(s)", list.total);
+    for listing in &list.items {
+        println!(
+            "{}\t{}\t{}\t{}",
+            listing.id,
+            human_price(listing),
+            human_location(listing),
+            listing.title
+        );
+    }
 }
 
 fn print_listing(listing: &Listing) {
@@ -108,7 +129,7 @@ fn print_listing(listing: &Listing) {
     }
 }
 
-fn human_price(listing: &Listing) -> String {
+pub(crate) fn human_price(listing: &Listing) -> String {
     match &listing.price {
         Some(price) => format_price(price),
         None => listing
@@ -138,7 +159,7 @@ fn human_price_type(price_type: &str) -> &str {
     }
 }
 
-fn human_location(listing: &Listing) -> String {
+pub(crate) fn human_location(listing: &Listing) -> String {
     human_location_optional(listing).unwrap_or_else(|| "-".to_owned())
 }
 

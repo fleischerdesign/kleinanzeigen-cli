@@ -41,6 +41,20 @@ pub fn write_json<T: Serialize>(value: &T) -> Result<()> {
     writeln!(lock).map_err(|error| Error::Internal(format!("could not write newline: {error}")))
 }
 
+/// Writes one already-shaped JSON value as a flushed newline-terminated line.
+///
+/// This is for streaming commands such as `watch`; regular command results use
+/// [`write_json`], which adds the success envelope.
+pub fn write_json_line<T: Serialize>(value: &T) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    serde_json::to_writer(&mut lock, value)
+        .map_err(|error| Error::Internal(format!("could not write JSON line: {error}")))?;
+    writeln!(lock).map_err(|error| Error::Internal(format!("could not write newline: {error}")))?;
+    lock.flush()
+        .map_err(|error| Error::Internal(format!("could not flush JSON line: {error}")))
+}
+
 #[derive(Serialize)]
 struct ErrorEnvelope<'a> {
     schema_version: u32,

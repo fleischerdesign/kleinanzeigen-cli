@@ -1,5 +1,7 @@
 //! Command-line surface.
 
+use std::time::Duration;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::domain::{AdType, SearchQuery, SearchSort};
@@ -51,14 +53,38 @@ pub enum Command {
 
     /// Fetch one listing by numeric identifier.
     Get(GetArgs),
+
+    /// List or filter provider categories.
+    Categories(CategoriesArgs),
+
+    /// Resolve provider locations.
+    Locations(LocationsArgs),
+
+    /// Fetch listings similar to one listing.
+    Similar(SimilarArgs),
+
+    /// Fetch other active ads from the same seller.
+    SellerOther(SellerOtherArgs),
+
+    /// Fetch the public homepage gallery.
+    Gallery,
+
+    /// Fetch a public seller profile.
+    Profile(ProfileArgs),
+
+    /// Fetch public view and watchlist counters.
+    Stats(StatsArgs),
+
+    /// Fetch search metadata for a category.
+    SearchMetadata(SearchMetadataArgs),
+
+    /// Poll a search and emit new listings as NDJSON.
+    Watch(WatchArgs),
 }
 
-/// Arguments for `search`.
+/// Arguments shared by search and watch.
 #[derive(Debug, Args)]
-pub struct SearchArgs {
-    /// Free-text query. Pass an empty string to browse a category.
-    pub query: String,
-
+pub struct SearchFilters {
     /// Provider category id or name.
     #[arg(long, value_name = "ID|NAME", value_parser = parse_reference_value)]
     pub category: Option<String>,
@@ -109,6 +135,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_top_ads: bool,
 
+    /// Sort order.
+    #[arg(long, value_name = "ORDER", value_enum)]
+    pub sort: Option<SortArg>,
+
     /// Page size, 1 to 50.
     #[arg(
         long,
@@ -117,6 +147,60 @@ pub struct SearchArgs {
         value_parser = clap::value_parser!(u32).range(1..=50)
     )]
     pub limit: u32,
+
+    /// Exclude listings whose title or description contains this term.
+    #[arg(long, value_name = "TERM", value_parser = parse_filter_term)]
+    pub exclude: Vec<String>,
+
+    /// Minimum number of rooms.
+    #[arg(long = "min-rooms", value_name = "N", value_parser = parse_non_negative_f64)]
+    pub min_rooms: Option<f64>,
+
+    /// Maximum number of rooms.
+    #[arg(long = "max-rooms", value_name = "N", value_parser = parse_non_negative_f64)]
+    pub max_rooms: Option<f64>,
+
+    /// Minimum living area in square metres.
+    #[arg(long = "min-size", value_name = "M2", value_parser = parse_non_negative_f64)]
+    pub min_size_m2: Option<f64>,
+
+    /// Maximum living area in square metres.
+    #[arg(long = "max-size", value_name = "M2", value_parser = parse_non_negative_f64)]
+    pub max_size_m2: Option<f64>,
+}
+
+impl SearchFilters {
+    /// Applies the shared filters to a search query.
+    pub fn apply(&self, query: &mut SearchQuery) {
+        query.category = self.category.clone();
+        query.location = self.location.clone();
+        query.location_id = self.location_id.clone();
+        query.radius_km = self.radius;
+        query.min_price_cents = self.min_price_cents;
+        query.max_price_cents = self.max_price_cents;
+        query.ad_type = self.ad_type.into();
+        query.picture_required = self.picture_required;
+        query.buy_now_only = self.buy_now_only;
+        query.include_top_ads = self.include_top_ads;
+        query.sort = self.sort.map(SearchSort::from);
+        query.limit = self.limit as usize;
+        query.exclude = self.exclude.clone();
+        query.min_rooms = self.min_rooms;
+        query.max_rooms = self.max_rooms;
+        query.min_size_m2 = self.min_size_m2;
+        query.max_size_m2 = self.max_size_m2;
+    }
+}
+
+/// Arguments for `search`.
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Free-text query. Pass an empty string to browse a category.
+    pub query: String,
+
+    /// Shared search filters.
+    #[command(flatten)]
+    pub filters: SearchFilters,
 
     /// Number of sequential pages to fetch, 1 to 10.
     #[arg(
@@ -130,31 +214,61 @@ pub struct SearchArgs {
     /// Opaque cursor from a previous page.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
-
-    /// Sort order.
-    #[arg(long, value_name = "ORDER", value_enum)]
-    pub sort: Option<SortArg>,
 }
 
 impl SearchArgs {
     /// Converts the parsed arguments into a domain query.
     pub fn to_query(&self) -> SearchQuery {
-        SearchQuery {
-            query: self.query.clone(),
-            category: self.category.clone(),
-            location: self.location.clone(),
-            location_id: self.location_id.clone(),
-            radius_km: self.radius,
-            min_price_cents: self.min_price_cents,
-            max_price_cents: self.max_price_cents,
-            ad_type: self.ad_type.into(),
-            picture_required: self.picture_required,
-            buy_now_only: self.buy_now_only,
-            include_top_ads: self.include_top_ads,
-            sort: self.sort.map(SearchSort::from),
-            limit: self.limit as usize,
-            pages: self.pages,
-            cursor: self.cursor.clone(),
+        let mut query = SearchQuery::new(self.query.as_str());
+        self.filters.apply(&mut query);
+        query.pages = self.pages;
+        query.cursor = self.cursor.clone();
+        query
+    }
+}
+
+/// Arguments for `watch`.
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    /// Free-text query.
+    pub query: String,
+
+    /// Shared search filters.
+    #[command(flatten)]
+    pub filters: SearchFilters,
+
+    /// Poll interval: 30s, 15m or 1h.
+    #[arg(long, default_value = "15m", value_name = "DURATION")]
+    pub interval: String,
+
+    /// Stop after this many polls. The default is unlimited.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=100000))]
+    pub max_polls: Option<u32>,
+
+    /// Fetch one snapshot and exit.
+    #[arg(long, conflicts_with = "max_polls")]
+    pub once: bool,
+}
+
+impl WatchArgs {
+    /// Converts the parsed arguments into a one-page watch query.
+    pub fn to_query(&self) -> SearchQuery {
+        let mut query = SearchQuery::new(self.query.as_str());
+        self.filters.apply(&mut query);
+        query.pages = 1;
+        query.cursor = None;
+        if query.sort.is_none() {
+            query.sort = Some(SearchSort::DateDescending);
+        }
+        query
+    }
+
+    /// Returns the maximum number of polls, where zero means unlimited.
+    pub fn poll_limit(&self) -> u32 {
+        if self.once {
+            1
+        } else {
+            self.max_polls.unwrap_or(0)
         }
     }
 }
@@ -164,6 +278,69 @@ impl SearchArgs {
 pub struct GetArgs {
     /// Numeric listing identifier.
     pub id: String,
+}
+
+/// Arguments for `categories`.
+#[derive(Debug, Args)]
+pub struct CategoriesArgs {
+    /// Optional case-insensitive name or path filter.
+    pub query: Option<String>,
+}
+
+/// Arguments for `locations`.
+#[derive(Debug, Args)]
+pub struct LocationsArgs {
+    /// Place name or postal code.
+    pub query: String,
+
+    /// Maximum number of matches.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 25,
+        value_parser = clap::value_parser!(u32).range(1..=100)
+    )]
+    pub limit: u32,
+}
+
+/// Arguments for `similar`.
+#[derive(Debug, Args)]
+pub struct SimilarArgs {
+    /// Numeric listing identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub id: String,
+}
+
+/// Arguments for `seller-other`.
+#[derive(Debug, Args)]
+pub struct SellerOtherArgs {
+    /// Numeric listing identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub id: String,
+}
+
+/// Arguments for `profile`.
+#[derive(Debug, Args)]
+pub struct ProfileArgs {
+    /// Numeric seller identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub user_id: String,
+}
+
+/// Arguments for `stats`.
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// Numeric listing identifier.
+    #[arg(value_parser = parse_numeric_id)]
+    pub id: String,
+}
+
+/// Arguments for `search-metadata`.
+#[derive(Debug, Args)]
+pub struct SearchMetadataArgs {
+    /// Provider category id or name.
+    #[arg(value_parser = parse_reference_value)]
+    pub category: String,
 }
 
 /// Ad type accepted on the command line.
@@ -258,6 +435,49 @@ fn parse_reference_value(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+fn parse_filter_term(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("exclude term must not be empty".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_non_negative_f64(value: &str) -> Result<f64, String> {
+    let value = value.trim().replace(',', ".");
+    let value = value
+        .parse::<f64>()
+        .map_err(|_| "value must be a finite non-negative number".to_owned())?;
+    if !value.is_finite() || value < 0.0 {
+        return Err("value must be a finite non-negative number".to_owned());
+    }
+    Ok(value)
+}
+
+/// Parses a watch interval. The minimum is 30 seconds.
+pub(crate) fn parse_interval(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+    let (number, factor) = if let Some(number) = value.strip_suffix('s') {
+        (number, 1)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3600)
+    } else {
+        return Err("interval must end in s, m or h, for example 30s or 15m".to_owned());
+    };
+    let number = number
+        .parse::<u64>()
+        .map_err(|_| "interval must be a whole number".to_owned())?;
+    let seconds = number
+        .checked_mul(factor)
+        .ok_or_else(|| "interval is too large".to_owned())?;
+    if seconds < 30 {
+        return Err("interval must be at least 30s".to_owned());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +516,12 @@ mod tests {
             "--picture-required",
             "--buy-now-only",
             "--include-top-ads",
+            "--exclude",
+            "defekt",
+            "--min-rooms",
+            "2,5",
+            "--max-size",
+            "120",
             "--pages",
             "2",
             "--sort",
@@ -317,6 +543,9 @@ mod tests {
         assert!(query.picture_required);
         assert!(query.buy_now_only);
         assert!(query.include_top_ads);
+        assert_eq!(query.exclude, ["defekt"]);
+        assert_eq!(query.min_rooms, Some(2.5));
+        assert_eq!(query.max_size_m2, Some(120.0));
         assert_eq!(query.pages, 2);
         assert_eq!(query.sort, Some(SearchSort::PriceAscending));
         assert_eq!(query.limit, 10);
@@ -357,5 +586,38 @@ mod tests {
     #[test]
     fn page_count_is_bounded() {
         assert!(Cli::try_parse_from(["kleinanzeigen", "search", "test", "--pages", "11"]).is_err());
+    }
+
+    #[test]
+    fn intervals_parse_with_a_floor() {
+        assert_eq!(
+            parse_interval("30s").expect("interval"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_interval("15m").expect("interval"),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            parse_interval("1h").expect("interval"),
+            Duration::from_secs(3600)
+        );
+        assert!(parse_interval("29s").is_err());
+        assert!(parse_interval("15").is_err());
+        assert!(parse_interval("5x").is_err());
+    }
+
+    #[test]
+    fn watch_defaults_to_newest_first_and_one_page() {
+        let cli = Cli::try_parse_from(["kleinanzeigen", "watch", "raspberry pi"])
+            .expect("valid arguments");
+        let Command::Watch(args) = cli.command else {
+            panic!("expected watch command");
+        };
+        let query = args.to_query();
+        assert_eq!(query.pages, 1);
+        assert!(query.cursor.is_none());
+        assert_eq!(query.sort, Some(SearchSort::DateDescending));
+        assert_eq!(args.poll_limit(), 0);
     }
 }

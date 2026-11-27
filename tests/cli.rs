@@ -190,6 +190,33 @@ fn search_json_is_stable() {
 }
 
 #[test]
+fn watch_once_emits_snapshot_ndjson() {
+    let (base_url, server) = serve_once(SEARCH_FIXTURE);
+    let output = server_command(&base_url)
+        .args(["--json", "watch", "synthetic", "--once", "--limit", "2"])
+        .output()
+        .expect("command runs");
+    server.join().expect("server finishes");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let events = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    for event in events {
+        assert_eq!(event["schema_version"], 1);
+        assert_eq!(event["event"], "snapshot");
+        assert!(event["data"]["id"].is_string());
+    }
+}
+
+#[test]
 fn get_json_is_stable() {
     let (base_url, server) = serve_once(DETAIL_FIXTURE);
     let output = server_command(&base_url)

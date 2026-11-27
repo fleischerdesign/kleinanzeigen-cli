@@ -11,6 +11,8 @@ public issue for a vulnerability, a leaked token or account data.
   password. It still belongs in the environment, never in the repository.
 - The CLI must not print credentials, cookies or message contents in logs.
 - Test fixtures must be sanitized before they are committed.
+- Public seller profiles are returned only by the explicit `profile` command;
+  `search` and `get` omit contact names, phone numbers and exact coordinates.
 - If a credential is exposed, rotate it at the source; deleting a commit is not
   enough.
 

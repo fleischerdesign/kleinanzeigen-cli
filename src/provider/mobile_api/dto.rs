@@ -32,6 +32,13 @@ impl FlexibleString {
             Self::Number(value) => value.to_string(),
         }
     }
+
+    pub(crate) fn to_plain_string(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Number(value) => value.to_string(),
+        }
+    }
 }
 
 /// A numeric scalar the API may return as a JSON number or a string.
@@ -148,6 +155,8 @@ pub(crate) struct Ad {
     pub(crate) attributes: Option<Attributes>,
     #[serde(rename = "negotiation-enabled")]
     pub(crate) negotiation_enabled: Option<Value<FlexibleBool>>,
+    #[serde(rename = "user-id")]
+    pub(crate) user_id: Option<Value<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +277,105 @@ pub(crate) struct LocationNode {
     #[serde(rename = "localized-name")]
     pub(crate) localized_name: Option<Value<String>>,
     pub(crate) location: Option<OneOrMany<Box<LocationNode>>>,
+}
+
+/// Public seller profile response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProfileResponse {
+    pub(crate) id: Option<FlexibleString>,
+    #[serde(rename = "userSince")]
+    pub(crate) user_since: Option<String>,
+    #[serde(rename = "contactName")]
+    pub(crate) contact_name: Option<String>,
+    #[serde(rename = "posterType")]
+    pub(crate) poster_type: Option<String>,
+    pub(crate) initials: Option<String>,
+    pub(crate) counters: Option<ProfileCounters>,
+    #[serde(rename = "replyIndicators")]
+    pub(crate) reply_indicators: Option<ReplyIndicators>,
+    #[serde(rename = "userBadges")]
+    pub(crate) user_badges: Option<UserBadges>,
+    #[serde(rename = "securePayment")]
+    pub(crate) secure_payment: Option<bool>,
+    #[serde(rename = "sellerAccountType")]
+    pub(crate) seller_account_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProfileCounters {
+    #[serde(rename = "historicalAds")]
+    pub(crate) historical_ads: Option<u64>,
+    #[serde(rename = "onlineAds")]
+    pub(crate) online_ads: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReplyIndicators {
+    #[serde(rename = "replySpeed")]
+    pub(crate) reply_speed: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UserBadges {
+    pub(crate) badges: Option<OneOrMany<ProfileBadge>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProfileBadge {
+    pub(crate) name: Option<String>,
+    pub(crate) level: Option<u64>,
+    pub(crate) value: Option<String>,
+}
+
+/// Search metadata response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SearchMetadataResponse {
+    #[serde(rename = "{http://www.ebayclassifiedsgroup.com/schema/ad/v1}ads-search-options")]
+    pub(crate) options: SearchMetadataEnvelope,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SearchMetadataEnvelope {
+    pub(crate) value: std::collections::HashMap<String, SearchFilter>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SearchFilter {
+    #[serde(rename = "localized-label")]
+    pub(crate) label: Option<String>,
+    #[serde(rename = "type")]
+    pub(crate) kind: Option<String>,
+    #[serde(rename = "search-param")]
+    pub(crate) search_param: Option<String>,
+    #[serde(rename = "supported-value")]
+    pub(crate) supported_value: Option<OneOrMany<FilterValue>>,
+    pub(crate) deprecated: Option<FlexibleBool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FilterValue {
+    pub(crate) value: Option<FlexibleString>,
+    #[serde(rename = "localized-label")]
+    pub(crate) localized_label: Option<String>,
+}
+
+/// View counter response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ViewsResponse {
+    pub(crate) value: Option<u64>,
+}
+
+/// Watchlist counter response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct WatchlistCountersResponse {
+    pub(crate) counters: Option<OneOrMany<WatchlistCounter>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WatchlistCounter {
+    #[serde(rename = "adId")]
+    pub(crate) ad_id: Option<FlexibleString>,
+    pub(crate) value: Option<u64>,
 }
 
 #[cfg(test)]
