@@ -153,6 +153,15 @@ impl SearchQuery {
             }
         }
 
+        if self.radius_km == Some(0) {
+            return Err(Error::Input(
+                "radius must be at least 1 kilometre".to_owned(),
+            ));
+        }
+        if self.exclude.iter().any(|term| term.trim().is_empty()) {
+            return Err(Error::Input("exclude terms must not be empty".to_owned()));
+        }
+
         for (name, value) in [
             ("minimum rooms", self.min_rooms),
             ("maximum rooms", self.max_rooms),
@@ -372,5 +381,19 @@ mod tests {
         assert_eq!(AdType::Wanted.as_api_value(), "WANTED");
         assert_eq!(PosterType::Private.as_api_value(), "PRIVATE");
         assert_eq!(PosterType::Commercial.as_api_value(), "COMMERCIAL");
+    }
+
+    #[test]
+    fn rejects_a_zero_radius_and_empty_exclude_terms() {
+        let mut query = SearchQuery::new("test");
+        query.radius_km = Some(0);
+        assert!(query.validate().is_err());
+
+        query.radius_km = Some(1);
+        query.exclude = vec!["  ".to_owned()];
+        assert!(query.validate().is_err());
+
+        query.exclude = vec!["defekt".to_owned()];
+        assert!(query.validate().is_ok());
     }
 }

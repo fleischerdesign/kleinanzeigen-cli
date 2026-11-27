@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Serialize;
 
 use crate::domain::{Listing, ListingId, SearchQuery};
@@ -91,64 +91,74 @@ pub(crate) struct State {
 }
 
 impl State {
-    /// Opens the default state database.
+    /// Opens the default state database for writing, creating it if needed.
     pub(crate) fn open_default() -> Result<Self> {
         Self::open_at(&state_path()?)
     }
 
-    /// Opens the default state database only if it already exists.
+    /// Opens the default state database read-only if it already exists.
     ///
-    /// Read-only callers use this so that inspecting state never creates an
-    /// empty database.
-    pub(crate) fn open_existing_default() -> Result<Option<Self>> {
+    /// Inspecting state never creates, migrates, chmods or otherwise changes
+    /// the database.
+    pub(crate) fn open_existing_read_only() -> Result<Option<Self>> {
         let path = state_path()?;
         if !path.exists() {
             return Ok(None);
         }
-        Self::open_at(&path).map(Some)
+        Self::open_read_only_at(&path).map(Some)
     }
 
-    /// Opens a state database at a given path.
+    /// Opens the default state database for writing if it already exists.
+    ///
+    /// Mutations use this so that removing a saved search never creates an
+    /// empty database.
+    pub(crate) fn open_existing_writable() -> Result<Option<Self>> {
+        let path = state_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        Self::open_existing_at(&path).map(Some)
+    }
+
+    /// Opens a state database at a given path, creating and initializing it.
     pub(crate) fn open_at(path: &Path) -> Result<Self> {
         Self::open_at_with_timeout(path, Duration::from_secs(5))
     }
 
-    fn open_at_with_timeout(path: &Path, timeout: Duration) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::Internal(format!("could not create state directory: {error}"))
-            })?;
-            set_private_directory(parent)?;
-        }
-        create_private_file(path)?;
+    /// Opens a state database at a given path read-only.
+    pub(crate) fn open_read_only_at(path: &Path) -> Result<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| Error::Internal(format!("could not open state database: {error}")))?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(db_error("busy timeout"))?;
+        require_current_schema(&connection)?;
+        Ok(Self { connection })
+    }
 
+    fn open_existing_at(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)
             .map_err(|error| Error::Internal(format!("could not open state database: {error}")))?;
         set_private_file(path)?;
-        connection
-            .busy_timeout(timeout)
-            .map_err(db_error("busy timeout"))?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(db_error("journal mode"))?;
-        connection
-            .execute_batch("PRAGMA foreign_keys=ON;")
-            .map_err(db_error("foreign keys"))?;
+        configure_writable(&connection, Duration::from_secs(5))?;
+        require_current_schema(&connection)?;
+        Ok(Self { connection })
+    }
 
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(db_error("schema version"))?;
+    fn open_at_with_timeout(path: &Path, timeout: Duration) -> Result<Self> {
+        ensure_state_directory(path)?;
+        create_private_file(path)?;
+
+        let mut connection = Connection::open(path)
+            .map_err(|error| Error::Internal(format!("could not open state database: {error}")))?;
+        set_private_file(path)?;
+        configure_writable(&connection, timeout)?;
+
+        let version = schema_version(&connection)?;
         if version == 0 {
-            connection
-                .execute_batch(SCHEMA)
-                .map_err(db_error("schema"))?;
-            connection
-                .pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(db_error("schema version write"))?;
+            initialize_schema(&mut connection)?;
         } else if version != SCHEMA_VERSION {
-            return Err(Error::Internal(format!(
-                "unsupported state schema version {version}"
-            )));
+            return Err(unsupported_version(version));
         }
 
         Ok(Self { connection })
@@ -174,118 +184,48 @@ impl State {
         Ok(ids)
     }
 
-    /// Marks one listing as seen for a watch key.
-    pub(crate) fn mark_seen(&self, query_key: &str, id: &ListingId, now: i64) -> Result<()> {
-        self.connection
-            .execute(
-                "INSERT OR IGNORE INTO watch_seen(query_key, listing_id, first_seen) \
-                 VALUES (?1, ?2, ?3)",
-                params![query_key, id.as_str(), now],
-            )
-            .map_err(db_error("mark seen"))?;
-        Ok(())
-    }
-
-    /// Clears the seen set for one watch key.
-    pub(crate) fn clear_seen(&self, query_key: &str) -> Result<()> {
-        self.connection
-            .execute("DELETE FROM watch_seen WHERE query_key = ?1", [query_key])
-            .map_err(db_error("clear seen"))?;
-        Ok(())
-    }
-
-    /// Records a listing and its price when the price changed.
-    pub(crate) fn record_listing(&mut self, listing: &Listing, now: i64) -> Result<()> {
+    /// Records one page of listings and its watch bookkeeping atomically.
+    ///
+    /// `reset_seen` clears the stored seen set for `query_key` in the same
+    /// transaction that records the new page, so a failed run cannot discard
+    /// resume progress. `saved_name` updates the saved search's last-run time.
+    pub(crate) fn record_page(
+        &mut self,
+        query_key: &str,
+        listings: &[Listing],
+        now: i64,
+        reset_seen: bool,
+        saved_name: Option<&str>,
+    ) -> Result<()> {
         let transaction = self
             .connection
             .transaction()
             .map_err(db_error("begin transaction"))?;
-        let previous = transaction
-            .query_row(
-                "SELECT last_price_cents, currency, price_type FROM listings WHERE id = ?1",
-                [listing.id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(db_error("read previous price"))?;
 
-        let amount_cents = listing.price.as_ref().map(|price| price.amount_cents());
-        let currency = listing.price.as_ref().map(|price| price.currency());
-        let price_type = listing.price_type.as_deref();
-        let category = listing
-            .category
-            .as_ref()
-            .map(|category| category.name.as_str());
-        let city = listing
-            .location
-            .as_ref()
-            .and_then(|location| location.city.as_deref());
-        let postal_code = listing
-            .location
-            .as_ref()
-            .and_then(|location| location.postal_code.as_deref());
+        if reset_seen {
+            transaction
+                .execute("DELETE FROM watch_seen WHERE query_key = ?1", [query_key])
+                .map_err(db_error("clear seen"))?;
+        }
 
-        transaction
-            .execute(
-                "INSERT INTO listings(
-                    id, first_seen, last_seen, title, url, status, category, city,
-                    postal_code, rooms, size_m2, last_price_cents, currency, price_type
-                 ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                 ON CONFLICT(id) DO UPDATE SET
-                    last_seen = excluded.last_seen,
-                    title = excluded.title,
-                    url = excluded.url,
-                    status = excluded.status,
-                    category = excluded.category,
-                    city = excluded.city,
-                    postal_code = excluded.postal_code,
-                    rooms = excluded.rooms,
-                    size_m2 = excluded.size_m2,
-                    last_price_cents = excluded.last_price_cents,
-                    currency = excluded.currency,
-                    price_type = excluded.price_type",
-                params![
-                    listing.id.as_str(),
-                    now,
-                    listing.title,
-                    listing.url.as_str(),
-                    listing.status,
-                    category,
-                    city,
-                    postal_code,
-                    listing.rooms,
-                    listing.size_m2,
-                    amount_cents,
-                    currency,
-                    price_type,
-                ],
-            )
-            .map_err(db_error("upsert listing"))?;
+        for listing in listings {
+            record_listing_in(&transaction, listing, now)?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO watch_seen(query_key, listing_id, first_seen) \
+                     VALUES (?1, ?2, ?3)",
+                    params![query_key, listing.id.as_str(), now],
+                )
+                .map_err(db_error("mark seen"))?;
+        }
 
-        if let (Some(amount_cents), Some(currency)) = (amount_cents, currency) {
-            let changed = previous
-                .as_ref()
-                .is_none_or(|(old_amount, old_currency, old_type)| {
-                    old_amount != &Some(amount_cents)
-                        || old_currency.as_deref() != Some(currency)
-                        || old_type.as_deref() != price_type
-                });
-            if changed {
-                transaction
-                    .execute(
-                        "INSERT INTO price_history(
-                            listing_id, seen_at, amount_cents, currency, price_type
-                         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![listing.id.as_str(), now, amount_cents, currency, price_type],
-                    )
-                    .map_err(db_error("insert price history"))?;
-            }
+        if let Some(name) = saved_name {
+            transaction
+                .execute(
+                    "UPDATE saved_searches SET last_run = ?1 WHERE name = ?2",
+                    params![now, name],
+                )
+                .map_err(db_error("mark saved run"))?;
         }
 
         transaction
@@ -429,17 +369,6 @@ impl State {
         Ok(changed > 0)
     }
 
-    /// Updates the last-run timestamp of a saved search.
-    pub(crate) fn saved_mark_run(&self, name: &str, now: i64) -> Result<()> {
-        self.connection
-            .execute(
-                "UPDATE saved_searches SET last_run = ?1 WHERE name = ?2",
-                params![now, name],
-            )
-            .map_err(db_error("mark saved run"))?;
-        Ok(())
-    }
-
     /// Returns all price-history rows, optionally for one listing.
     pub(crate) fn export_history(
         &self,
@@ -543,6 +472,98 @@ pub struct ExportListing {
     pub price_type: Option<String>,
 }
 
+fn record_listing_in(transaction: &Transaction<'_>, listing: &Listing, now: i64) -> Result<()> {
+    let previous = transaction
+        .query_row(
+            "SELECT last_price_cents, currency, price_type FROM listings WHERE id = ?1",
+            [listing.id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(db_error("read previous price"))?;
+
+    let amount_cents = listing.price.as_ref().map(|price| price.amount_cents());
+    let currency = listing.price.as_ref().map(|price| price.currency());
+    let price_type = listing.price_type.as_deref();
+    let category = listing
+        .category
+        .as_ref()
+        .map(|category| category.name.as_str());
+    let city = listing
+        .location
+        .as_ref()
+        .and_then(|location| location.city.as_deref());
+    let postal_code = listing
+        .location
+        .as_ref()
+        .and_then(|location| location.postal_code.as_deref());
+
+    transaction
+        .execute(
+            "INSERT INTO listings(
+                id, first_seen, last_seen, title, url, status, category, city,
+                postal_code, rooms, size_m2, last_price_cents, currency, price_type
+             ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(id) DO UPDATE SET
+                last_seen = excluded.last_seen,
+                title = excluded.title,
+                url = excluded.url,
+                status = excluded.status,
+                category = excluded.category,
+                city = excluded.city,
+                postal_code = excluded.postal_code,
+                rooms = excluded.rooms,
+                size_m2 = excluded.size_m2,
+                last_price_cents = excluded.last_price_cents,
+                currency = excluded.currency,
+                price_type = excluded.price_type",
+            params![
+                listing.id.as_str(),
+                now,
+                listing.title,
+                listing.url.as_str(),
+                listing.status,
+                category,
+                city,
+                postal_code,
+                listing.rooms,
+                listing.size_m2,
+                amount_cents,
+                currency,
+                price_type,
+            ],
+        )
+        .map_err(db_error("upsert listing"))?;
+
+    if let (Some(amount_cents), Some(currency)) = (amount_cents, currency) {
+        let changed = previous
+            .as_ref()
+            .is_none_or(|(old_amount, old_currency, old_type)| {
+                old_amount != &Some(amount_cents)
+                    || old_currency.as_deref() != Some(currency)
+                    || old_type.as_deref() != price_type
+            });
+        if changed {
+            transaction
+                .execute(
+                    "INSERT INTO price_history(
+                        listing_id, seen_at, amount_cents, currency, price_type
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![listing.id.as_str(), now, amount_cents, currency, price_type],
+                )
+                .map_err(db_error("insert price history"))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// One exported price-history row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExportRow {
@@ -556,6 +577,68 @@ pub struct ExportRow {
     pub currency: String,
     /// Provider price classification.
     pub price_type: Option<String>,
+}
+
+fn configure_writable(connection: &Connection, timeout: Duration) -> Result<()> {
+    connection
+        .busy_timeout(timeout)
+        .map_err(db_error("busy timeout"))?;
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(db_error("journal mode"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(db_error("foreign keys"))
+}
+
+fn schema_version(connection: &Connection) -> Result<i64> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(db_error("schema version"))
+}
+
+fn require_current_schema(connection: &Connection) -> Result<()> {
+    let version = schema_version(connection)?;
+    if version == 0 {
+        return Err(Error::Internal(
+            "state database is not initialized".to_owned(),
+        ));
+    }
+    if version != SCHEMA_VERSION {
+        return Err(unsupported_version(version));
+    }
+    Ok(())
+}
+
+fn initialize_schema(connection: &mut Connection) -> Result<()> {
+    let transaction = connection
+        .transaction()
+        .map_err(db_error("begin schema transaction"))?;
+    transaction
+        .execute_batch(SCHEMA)
+        .map_err(db_error("schema"))?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(db_error("schema version write"))?;
+    transaction
+        .commit()
+        .map_err(db_error("commit schema transaction"))
+}
+
+fn unsupported_version(version: i64) -> Error {
+    Error::Internal(format!("unsupported state schema version {version}"))
+}
+
+fn ensure_state_directory(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() || parent.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(parent)
+        .map_err(|error| Error::Internal(format!("could not create state directory: {error}")))?;
+    set_private_directory(parent)
 }
 
 fn db_error(context: &'static str) -> impl FnOnce(rusqlite::Error) -> Error {
@@ -597,23 +680,33 @@ fn set_private_directory(_path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn create_private_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    if !path.exists() {
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)
-            .map_err(|error| {
-                Error::Internal(format!("could not create state database: {error}"))
-            })?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(Error::Internal(format!(
+            "could not create state database: {error}"
+        ))),
     }
-    Ok(())
 }
 
 #[cfg(not(unix))]
-fn create_private_file(_path: &Path) -> Result<()> {
-    Ok(())
+fn create_private_file(path: &Path) -> Result<()> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(Error::Internal(format!(
+            "could not create state database: {error}"
+        ))),
+    }
 }
 
 #[cfg(unix)]
@@ -672,10 +765,6 @@ mod tests {
         let id = ListingId::new("123").expect("id");
         {
             let mut state = State::open_at(&path).expect("state");
-            state.mark_seen("key", &id, 1).expect("seen");
-            assert!(state.seen_ids("key").expect("ids").contains(&id));
-            state.clear_seen("key").expect("clear");
-            assert!(state.seen_ids("key").expect("ids").is_empty());
             state
                 .saved_add("test", &query, "15m", 1)
                 .expect("saved add");
@@ -683,16 +772,32 @@ mod tests {
                 state.saved_get("test").expect("saved").unwrap().name,
                 "test"
             );
+
             state
-                .record_listing(&listing("123", 100), 10)
+                .record_page("key", &[listing("123", 100)], 10, false, None)
                 .expect("record");
+            assert!(state.seen_ids("key").expect("ids").contains(&id));
             state
-                .record_listing(&listing("123", 100), 11)
+                .record_page("key", &[listing("123", 100)], 11, false, None)
                 .expect("record same");
             state
-                .record_listing(&listing("123", 200), 12)
+                .record_page("key", &[listing("123", 200)], 12, false, None)
                 .expect("record new");
             assert_eq!(state.history(&id).expect("history").len(), 2);
+
+            state
+                .record_page("key", &[], 13, true, None)
+                .expect("clear seen");
+            assert!(state.seen_ids("key").expect("ids").is_empty());
+            state
+                .record_page("key", &[listing("123", 200)], 14, false, Some("test"))
+                .expect("record saved run");
+            assert!(state.seen_ids("key").expect("ids").contains(&id));
+            assert_eq!(
+                state.saved_get("test").expect("saved").unwrap().last_run,
+                Some(14)
+            );
+
             assert_eq!(state.export_history(None, 100).expect("export").len(), 2);
             assert_eq!(
                 state
@@ -709,8 +814,94 @@ mod tests {
                     .len(),
                 1
             );
-            assert!(state.saved_remove("test").expect("remove"));
         }
+
+        let before = fs::read(&path).expect("database bytes");
+        {
+            let read = State::open_read_only_at(&path).expect("read-only state");
+            assert_eq!(read.history(&id).expect("read history").len(), 2);
+            assert_eq!(
+                read.saved_get("test")
+                    .expect("read saved")
+                    .expect("saved")
+                    .last_run,
+                Some(14)
+            );
+            assert!(
+                read.saved_remove("test").is_err(),
+                "read-only state must reject writes"
+            );
+        }
+        assert_eq!(
+            fs::read(&path).expect("database bytes after read"),
+            before,
+            "a read-only open must not change the database"
+        );
+
+        let state = State::open_at(&path).expect("state for removal");
+        assert!(state.saved_remove("test").expect("remove"));
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn read_only_open_does_not_change_permissions() {
+        let path = path();
+        let parent = path.parent().expect("parent");
+        let mut state = State::open_at(&path).expect("state");
+        state
+            .record_page("key", &[listing("123", 100)], 1, false, None)
+            .expect("record");
+        drop(state);
+
+        #[cfg(unix)]
+        let before_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(parent).expect("metadata").permissions().mode() & 0o777
+        };
+        #[cfg(unix)]
+        assert_eq!(before_mode, 0o700);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o755))
+                .expect("relax directory for the test");
+        }
+        #[cfg(unix)]
+        let loose_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(parent).expect("metadata").permissions().mode() & 0o777
+        };
+
+        let read = State::open_read_only_at(&path).expect("read-only state");
+        drop(read);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let after_mode = fs::metadata(parent).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(
+                after_mode, loose_mode,
+                "a read-only open must not change directory permissions"
+            );
+        }
+
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn read_only_open_rejects_an_uninitialized_database() {
+        let path = path();
+        fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        fs::write(&path, b"").expect("empty database");
+        let error = match State::open_read_only_at(&path) {
+            Ok(_) => panic!("an uninitialized database must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not initialized"),
+            "unexpected error: {error}"
+        );
         let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 
@@ -733,6 +924,14 @@ mod tests {
             error.to_string().contains("schema version 99"),
             "unexpected error: {error}"
         );
+        let error = match State::open_read_only_at(&path) {
+            Ok(_) => panic!("a read-only version check must reject version 99"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("schema version 99"),
+            "unexpected read-only error: {error}"
+        );
         let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 
@@ -741,16 +940,15 @@ mod tests {
         let path = path();
         let first = State::open_at_with_timeout(&path, Duration::from_millis(50))
             .expect("first connection");
-        let second = State::open_at_with_timeout(&path, Duration::from_millis(50))
+        let mut second = State::open_at_with_timeout(&path, Duration::from_millis(50))
             .expect("second connection");
 
         first
             .connection
             .execute_batch("BEGIN IMMEDIATE")
             .expect("write lock");
-        let id = ListingId::new("123").expect("id");
         let error = second
-            .mark_seen("key", &id, 1)
+            .record_page("key", &[listing("123", 100)], 1, false, None)
             .expect_err("second writer must not succeed");
         assert!(
             error.to_string().contains("locked"),

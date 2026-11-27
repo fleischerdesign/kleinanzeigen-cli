@@ -421,8 +421,10 @@ pub struct SavedNameArgs {
 pub enum ExportFormat {
     /// One JSON object per line.
     Jsonl,
-    /// Comma-separated rows.
+    /// Comma-separated rows, raw.
     Csv,
+    /// Comma-separated rows with spreadsheet formula escaping.
+    CsvSafe,
 }
 
 /// What an export contains.

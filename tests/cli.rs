@@ -378,6 +378,16 @@ fn watch_store_records_history_and_resumes() {
     assert!(csv.contains("1234567890,"), "csv was: {csv}");
     assert!(csv.contains(",1250,EUR,PLEASE_CONTACT\n"), "csv was: {csv}");
 
+    let safe = state
+        .command()
+        .args(["export", "--kind", "listings", "--format", "csv-safe"])
+        .output()
+        .expect("command runs");
+    assert!(safe.status.success());
+    let safe = String::from_utf8(safe.stdout).expect("stdout is UTF-8");
+    assert!(safe.starts_with("id,first_seen,last_seen,title,"));
+    assert!(safe.contains("Synthetic bike & trailer"));
+
     let bounded = state
         .command()
         .args(["export", "--limit", "1"])
@@ -479,6 +489,84 @@ fn watch_store_records_history_and_resumes() {
         "resume must not repeat seen listings: {}",
         String::from_utf8_lossy(&resumed.stdout)
     );
+}
+
+#[test]
+fn failed_fresh_keeps_resume_state() {
+    let state = TempState::new();
+    let (base_url, server) = serve_once(SEARCH_FIXTURE);
+    let stored = server_command(&base_url)
+        .env("KLEINANZEIGEN_STATE_DIR", state.path())
+        .args([
+            "--json",
+            "watch",
+            "synthetic",
+            "--once",
+            "--store",
+            "--limit",
+            "2",
+        ])
+        .output()
+        .expect("command runs");
+    server.join().expect("server finishes");
+    assert!(
+        stored.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+
+    let failed = command()
+        .env("KLEINANZEIGEN_STATE_DIR", state.path())
+        .args([
+            "--json",
+            "watch",
+            "synthetic",
+            "--once",
+            "--fresh",
+            "--limit",
+            "2",
+        ])
+        .output()
+        .expect("command runs");
+    assert_eq!(failed.status.code(), Some(2));
+
+    let (base_url, server) = serve_once(SEARCH_FIXTURE);
+    let resumed = server_command(&base_url)
+        .env("KLEINANZEIGEN_STATE_DIR", state.path())
+        .args([
+            "--json",
+            "watch",
+            "synthetic",
+            "--once",
+            "--resume",
+            "--limit",
+            "2",
+        ])
+        .output()
+        .expect("command runs");
+    server.join().expect("server finishes");
+    assert!(
+        resumed.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        resumed.stdout.is_empty(),
+        "a failed fresh must keep the stored seen set: {}",
+        String::from_utf8_lossy(&resumed.stdout)
+    );
+}
+
+#[test]
+fn resume_without_state_is_not_found() {
+    let state = TempState::new();
+    state
+        .command()
+        .args(["--json", "watch", "synthetic", "--once", "--resume"])
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("stored watch state"));
 }
 
 #[test]

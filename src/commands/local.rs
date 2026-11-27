@@ -13,7 +13,7 @@ use crate::state::{SavedSearch, State};
 /// Shows locally recorded price history.
 pub fn history(args: HistoryArgs, format: Format) -> Result<()> {
     let id = ListingId::new(args.id)?;
-    let points = match State::open_existing_default()? {
+    let points = match State::open_existing_read_only()? {
         Some(state) => state.history(&id)?,
         None => Vec::new(),
     };
@@ -38,8 +38,6 @@ pub fn history(args: HistoryArgs, format: Format) -> Result<()> {
 
 /// Manages saved searches.
 pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
-    let state = State::open_existing_default()?;
-
     match command {
         SavedCommand::Add(args) => {
             let name = args.name.trim();
@@ -59,7 +57,7 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
             output_saved(&saved, format)
         }
         SavedCommand::List => {
-            let saved = match &state {
+            let saved = match State::open_existing_read_only()? {
                 Some(state) => state.saved_list()?,
                 None => Vec::new(),
             };
@@ -75,7 +73,7 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
         }
         SavedCommand::Show(args) => {
             let name = checked_name(&args);
-            let saved = match &state {
+            let saved = match State::open_existing_read_only()? {
                 Some(state) => state.saved_get(name)?,
                 None => None,
             };
@@ -84,7 +82,7 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
         }
         SavedCommand::Remove(args) => {
             let name = checked_name(&args);
-            let removed = match &state {
+            let removed = match State::open_existing_writable()? {
                 Some(state) => state.saved_remove(name)?,
                 None => false,
             };
@@ -114,7 +112,7 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
 /// Exports locally recorded state.
 pub fn export(args: ExportArgs, _format: Format) -> Result<()> {
     let listing = args.listing.as_deref();
-    let state = State::open_existing_default()?;
+    let state = State::open_existing_read_only()?;
 
     match args.kind {
         ExportKind::History => {
@@ -129,16 +127,17 @@ pub fn export(args: ExportArgs, _format: Format) -> Result<()> {
                     }
                     Ok(())
                 }
-                ExportFormat::Csv => {
+                ExportFormat::Csv | ExportFormat::CsvSafe => {
+                    let safe = matches!(args.format, ExportFormat::CsvSafe);
                     println!("listing_id,seen_at,amount_cents,currency,price_type");
                     for row in &rows {
                         println!(
                             "{},{},{},{},{}",
-                            csv_field(&row.listing_id),
+                            csv_field(&row.listing_id, safe),
                             row.seen_at,
                             row.amount_cents,
-                            csv_field(&row.currency),
-                            csv_field(row.price_type.as_deref().unwrap_or(""))
+                            csv_field(&row.currency, safe),
+                            csv_field(row.price_type.as_deref().unwrap_or(""), safe)
                         );
                     }
                     Ok(())
@@ -157,7 +156,8 @@ pub fn export(args: ExportArgs, _format: Format) -> Result<()> {
                     }
                     Ok(())
                 }
-                ExportFormat::Csv => {
+                ExportFormat::Csv | ExportFormat::CsvSafe => {
+                    let safe = matches!(args.format, ExportFormat::CsvSafe);
                     println!(
                         "id,first_seen,last_seen,title,url,status,category,city,\
                          postal_code,rooms,size_m2,last_price_cents,currency,price_type"
@@ -165,22 +165,22 @@ pub fn export(args: ExportArgs, _format: Format) -> Result<()> {
                     for row in &rows {
                         println!(
                             "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                            csv_field(&row.id),
+                            csv_field(&row.id, safe),
                             row.first_seen,
                             row.last_seen,
-                            csv_field(&row.title),
-                            csv_field(&row.url),
-                            csv_field(row.status.as_deref().unwrap_or("")),
-                            csv_field(row.category.as_deref().unwrap_or("")),
-                            csv_field(row.city.as_deref().unwrap_or("")),
-                            csv_field(row.postal_code.as_deref().unwrap_or("")),
+                            csv_field(&row.title, safe),
+                            csv_field(&row.url, safe),
+                            csv_field(row.status.as_deref().unwrap_or(""), safe),
+                            csv_field(row.category.as_deref().unwrap_or(""), safe),
+                            csv_field(row.city.as_deref().unwrap_or(""), safe),
+                            csv_field(row.postal_code.as_deref().unwrap_or(""), safe),
                             optional_number(row.rooms),
                             optional_number(row.size_m2),
                             row.last_price_cents
                                 .map(|cents| cents.to_string())
                                 .unwrap_or_default(),
-                            csv_field(row.currency.as_deref().unwrap_or("")),
-                            csv_field(row.price_type.as_deref().unwrap_or(""))
+                            csv_field(row.currency.as_deref().unwrap_or(""), safe),
+                            csv_field(row.price_type.as_deref().unwrap_or(""), safe)
                         );
                     }
                     Ok(())
@@ -212,12 +212,29 @@ fn checked_name(args: &SavedNameArgs) -> &str {
     args.name.trim()
 }
 
-fn csv_field(value: &str) -> String {
+fn csv_field(value: &str, safe: bool) -> String {
+    let value = if safe {
+        csv_formula_escape(value)
+    } else {
+        value.to_owned()
+    };
     if value
         .chars()
         .any(|character| matches!(character, ',' | '"' | '\n' | '\r'))
     {
         format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value
+    }
+}
+
+fn csv_formula_escape(value: &str) -> String {
+    if value
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{value}")
     } else {
         value.to_owned()
     }
@@ -229,4 +246,29 @@ fn optional_number(value: Option<f64>) -> String {
 
 fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_safe_escapes_formula_prefixes() {
+        for value in ["=1+1", "+SUM(A1)", "-2+3", "@cmd", "\tvalue", "\rvalue"] {
+            assert!(
+                csv_formula_escape(value).starts_with('\''),
+                "not escaped: {value:?}"
+            );
+        }
+        assert_eq!(csv_formula_escape("Synthetic bike"), "Synthetic bike");
+        assert_eq!(csv_formula_escape("'already text"), "'already text");
+    }
+
+    #[test]
+    fn csv_quoting_happens_after_formula_escaping() {
+        assert_eq!(csv_field("=1,2", true), "\"'=1,2\"");
+        assert_eq!(csv_field("=1,2", false), "\"=1,2\"");
+        assert_eq!(csv_field("plain", true), "plain");
+        assert_eq!(csv_field("a\"b", false), "\"a\"\"b\"");
+    }
 }
