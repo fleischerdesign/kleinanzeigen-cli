@@ -4,7 +4,7 @@
 
 Unofficial, browser-free CLI for [Kleinanzeigen](https://www.kleinanzeigen.de). Built in Rust for agents and humans.
 
-> **Status:** read-only public API. Search, detail, reference data, discovery, metadata, counters and `watch` work without an account. Optional local SQLite state keeps watch progress, price history and saved searches; it holds public listing data only. There is no account login, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
+> **Status:** read-only public API. Search, detail, reference data, discovery, metadata, counters and `watch` work without an account. Optional local SQLite state keeps watch progress, price history and saved searches; it holds public listing data only. A read-only MCP server exposes the same surface over stdio. There is no account login, no telemetry and no mutation command. The app credential is supplied by the operator and is not part of this repository.
 
 ## Why
 
@@ -39,7 +39,8 @@ direnv allow
 cargo build --locked --release
 ```
 
-The binary is `target/release/kleinanzeigen`.
+The binary is `target/release/kleinanzeigen`. The package also installs
+`kleinanzeigen-mcp`, the read-only MCP server.
 
 ## Provider configuration
 
@@ -118,6 +119,9 @@ kleinanzeigen saved list --json
 kleinanzeigen watch --saved camper --store --json
 kleinanzeigen export --kind history --format jsonl
 kleinanzeigen export --kind listings --format csv --limit 100
+
+# Read-only MCP server over stdio.
+kleinanzeigen-mcp
 ```
 
 Search filters:
@@ -161,11 +165,42 @@ the query, filters and interval from a saved search; filters and `--interval`
 cannot be combined with it. State is optional and local; delete the database to
 reset it.
 
-Planned, not implemented: `login`, own ads, drafts and publishing, messages,
-MCP.
+Planned, not implemented: `login`, own ads, drafts and publishing, messages.
 
-Planned, not implemented: `login`, own ads, drafts and publishing, messages,
-MCP.
+## MCP server
+
+`kleinanzeigen-mcp` serves the same read-only surface over stdio using
+newline-delimited JSON-RPC 2.0. It negotiates protocol `2025-06-18` and accepts
+`2024-11-05` or `2025-03-26` from the client.
+
+Tools: `search`, `get`, `similar`, `seller_other`, `gallery`, `profile`,
+`stats`, `stats_batch`, `images`, `categories`, `locations`, `search_metadata`,
+`location`, `flag_reasons`, `saved_list`, `saved_show`, `history` and
+`watch_once`. `watch_once` is a bounded, single-page snapshot; it never stores
+state. The local state tools are read-only.
+
+Every tool returns the same `{"schema_version":1,"data":...}` envelope as text
+content. A tool failure sets `isError` and carries the same structured error
+object as the CLI. Protocol errors use standard JSON-RPC codes. No tool logs to
+stdout, mutates provider data or exposes the app credential.
+
+The server reads `KLEINANZEIGEN_BASIC_USER`, `KLEINANZEIGEN_BASIC_PW` and the
+optional provider overrides from its environment. Pass them through the MCP
+client configuration rather than committing them:
+
+```json
+{
+  "mcpServers": {
+    "kleinanzeigen": {
+      "command": "kleinanzeigen-mcp",
+      "env": {
+        "KLEINANZEIGEN_BASIC_USER": "...",
+        "KLEINANZEIGEN_BASIC_PW": "..."
+      }
+    }
+  }
+}
+```
 
 The public read surface covers search, detail, reference data, discovery,
 metadata, public counters and `watch`. `similar` and `seller-other` are fixed
@@ -367,6 +402,7 @@ Exit codes:
 
 - `--json` writes exactly one JSON object to stdout per command result.
 - `watch --json` is the exception: it writes one event object per line, each with `schema_version`, `event` and `data`. `export` likewise writes bare rows, not an envelope.
+- `kleinanzeigen-mcp` returns the same `{"schema_version":1,"data":...}` envelope as text content; tool errors carry the same `error` object with `isError: true`.
 - On failure, stderr contains exactly one JSON error object; logs are suppressed in JSON mode.
 - `--help` and `--version` are plaintext and exit `0`; they are not command results.
 - Every object carries `schema_version`. It changes only when the machine contract changes, independent of the binary version.
@@ -391,11 +427,14 @@ Exit codes:
 ```
 src/
 ├── main.rs        binary entry point, exit-code mapping
+├── bin/
+│   └── kleinanzeigen-mcp.rs  stdio MCP entry point
 ├── lib.rs         library root, module contract
 ├── cli.rs         clap surface and the shell contract
 ├── commands/      search, discovery, reference, local state and watch commands
 ├── doctor.rs      local diagnostics
 ├── error.rs       typed errors and stable exit codes
+├── mcp.rs         read-only MCP server, JSON-RPC loop and tool schemas
 ├── output.rs      JSON, NDJSON and human-readable output
 ├── state.rs       local SQLite: watch progress, price history, saved searches
 ├── domain/
@@ -439,6 +478,9 @@ output contract, not a serialization of internal structs.
 - The state database holds public listing fields, watch seen ids, price points
   and saved searches. It holds no credentials, cookies, tokens or raw response
   bodies. Delete the file to reset all local state.
+- The MCP server exposes only read tools. `saved_list`, `saved_show` and
+  `history` read an existing database and never create one; `watch_once` does
+  not write state.
 - Listing output includes city, postal code, the public seller id and public
   image URLs. Exact ad coordinates, contact names and phone numbers are not
   emitted by search or get. The explicit `profile` command returns the public
@@ -481,7 +523,8 @@ The roadmap is ordered by evidence, not by feature count. Each step has an
 abort condition; a later step does not start on an unproven earlier one.
 The public read surface and local no-account state are implemented: search,
 detail, reference data, discovery, metadata, counters, `watch`, price history,
-saved searches and export. The account milestones are not.
+saved searches and export. The read-only MCP server exposes the same surface.
+The account milestones are not.
 
 ### 1. Access decision and transport spike
 
@@ -541,8 +584,7 @@ without an idempotency guarantee.
 Read messages first; replies are separately confirmed. `watch` is implemented
 with an interval floor, an explicit poll limit and opt-in local state for resume,
 price history and saved searches. Renew and delete deliberately separate. The
-stdio MCP wrapper over the stable read contract is the next no-account
-extension.
+read-only stdio MCP wrapper over the stable read contract is implemented.
 
 **Abort:** unclear cost, permission, load budget or concrete user need for the
 individual feature.

@@ -28,6 +28,7 @@ gate for the read path and the starting point for account features.
 | Loyalty top-trader badge | Gateway loyalty-service | no | 404 for a normal public seller | Omit |
 | Category ad schema | Mobile CAPI `ads/metadata/{id}.json` | no | Internal read/write schema, not a public search filter | Omit |
 | Watch | Polling the public search endpoint | yes | Unit and local-shell tests; live snapshot | Stop the stream |
+| MCP server | Local stdio JSON-RPC over the same provider | yes | Protocol and tool tests; live smoke | Read-only tools only |
 | Persistent watch state | Local SQLite, opt-in | yes | Restart/resume test | Stateless by default |
 | Price history | Local SQLite, opt-in | yes | Round-trip and price-change tests | Empty history |
 | Saved searches | Local SQLite | yes | Local-shell lifecycle test | Not found |
@@ -67,7 +68,8 @@ Re-check the read path when the app or the transport changes.
   at most one category and one location lookup. Pages are fetched sequentially
   with a 500 ms pause. `gallery` follows the same page budget. `watch` polls one
   search page per interval; the minimum interval is 30 seconds. Persisted and
-  saved watches add no requests beyond the same one page per poll. `stats` makes
+  saved watches add no requests beyond the same one page per poll. The MCP
+  server makes one request per read tool and never repeats a call. `stats` makes
   two requests; `stats-batch` makes one watchlist request plus one view request
   per id. Reference, discovery, image, location and flag-reason commands make
   one request each, plus a category lookup when a metadata category is given by
@@ -84,6 +86,7 @@ Re-check the read path when the app or the transport changes.
   points and saved searches. It stores no credentials, cookies, tokens or raw
   response bodies. Deleting the file resets all local state. Without `--store`,
   `--resume`, `--fresh` or `--saved`, `watch` keeps only the seen ids in memory.
+  The MCP server reads this database without creating or changing it.
 - **Log redaction:** no `Authorization`, app install id, token, response body,
   contact data or coordinates in logs. In JSON mode logging is disabled. A
   request log line carries only the operation, HTTP status and duration.

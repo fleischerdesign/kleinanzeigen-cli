@@ -13,8 +13,10 @@ use crate::state::{SavedSearch, State};
 /// Shows locally recorded price history.
 pub fn history(args: HistoryArgs, format: Format) -> Result<()> {
     let id = ListingId::new(args.id)?;
-    let state = State::open_default()?;
-    let points = state.history(&id)?;
+    let points = match State::open_existing_default()? {
+        Some(state) => state.history(&id)?,
+        None => Vec::new(),
+    };
 
     match format {
         Format::Json => write_json(&points),
@@ -36,7 +38,7 @@ pub fn history(args: HistoryArgs, format: Format) -> Result<()> {
 
 /// Manages saved searches.
 pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
-    let state = State::open_default()?;
+    let state = State::open_existing_default()?;
 
     match command {
         SavedCommand::Add(args) => {
@@ -49,6 +51,7 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
             parse_interval(&args.interval).map_err(Error::Input)?;
             let query = args.to_query();
             query.validate()?;
+            let state = State::open_default()?;
             state.saved_add(name, &query, &args.interval, now())?;
             let saved = state
                 .saved_get(name)?
@@ -56,7 +59,10 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
             output_saved(&saved, format)
         }
         SavedCommand::List => {
-            let saved = state.saved_list()?;
+            let saved = match &state {
+                Some(state) => state.saved_list()?,
+                None => Vec::new(),
+            };
             match format {
                 Format::Json => write_json(&saved),
                 Format::Human => {
@@ -69,14 +75,19 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
         }
         SavedCommand::Show(args) => {
             let name = checked_name(&args);
-            let saved = state
-                .saved_get(name)?
-                .ok_or_else(|| Error::NotFound(format!("saved search {name}")))?;
+            let saved = match &state {
+                Some(state) => state.saved_get(name)?,
+                None => None,
+            };
+            let saved = saved.ok_or_else(|| Error::NotFound(format!("saved search {name}")))?;
             output_saved(&saved, format)
         }
         SavedCommand::Remove(args) => {
             let name = checked_name(&args);
-            let removed = state.saved_remove(name)?;
+            let removed = match &state {
+                Some(state) => state.saved_remove(name)?,
+                None => false,
+            };
             let result = Removed {
                 name: name.to_owned(),
                 removed,
@@ -103,11 +114,14 @@ pub fn saved(command: SavedCommand, format: Format) -> Result<()> {
 /// Exports locally recorded state.
 pub fn export(args: ExportArgs, _format: Format) -> Result<()> {
     let listing = args.listing.as_deref();
-    let state = State::open_default()?;
+    let state = State::open_existing_default()?;
 
     match args.kind {
         ExportKind::History => {
-            let rows = state.export_history(listing, args.limit)?;
+            let rows = match &state {
+                Some(state) => state.export_history(listing, args.limit)?,
+                None => Vec::new(),
+            };
             match args.format {
                 ExportFormat::Jsonl => {
                     for row in &rows {
@@ -132,7 +146,10 @@ pub fn export(args: ExportArgs, _format: Format) -> Result<()> {
             }
         }
         ExportKind::Listings => {
-            let rows = state.export_listings(listing, args.limit)?;
+            let rows = match &state {
+                Some(state) => state.export_listings(listing, args.limit)?,
+                None => Vec::new(),
+            };
             match args.format {
                 ExportFormat::Jsonl => {
                     for row in &rows {

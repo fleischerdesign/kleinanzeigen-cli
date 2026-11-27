@@ -22,6 +22,9 @@ pub mod domain;
 /// Typed errors and stable process exit codes.
 pub mod error;
 
+/// Read-only Model Context Protocol server over stdio.
+pub mod mcp;
+
 /// Output helpers for JSON and human-readable text.
 pub mod output;
 

@@ -27,10 +27,11 @@ pub async fn watch(args: WatchArgs, format: Format) -> Result<()> {
                 "search filters cannot be combined with --saved".to_owned(),
             ));
         }
-        let state = State::open_default()?;
-        let saved = state
-            .saved_get(name)?
-            .ok_or_else(|| Error::NotFound(format!("saved search {name}")))?;
+        let saved = match State::open_existing_default()? {
+            Some(state) => state.saved_get(name)?,
+            None => None,
+        }
+        .ok_or_else(|| Error::NotFound(format!("saved search {name}")))?;
         let interval = parse_interval(&saved.interval).map_err(Error::Input)?;
         (saved.query, interval)
     } else {

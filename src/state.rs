@@ -96,8 +96,24 @@ impl State {
         Self::open_at(&state_path()?)
     }
 
+    /// Opens the default state database only if it already exists.
+    ///
+    /// Read-only callers use this so that inspecting state never creates an
+    /// empty database.
+    pub(crate) fn open_existing_default() -> Result<Option<Self>> {
+        let path = state_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        Self::open_at(&path).map(Some)
+    }
+
     /// Opens a state database at a given path.
     pub(crate) fn open_at(path: &Path) -> Result<Self> {
+        Self::open_at_with_timeout(path, Duration::from_secs(5))
+    }
+
+    fn open_at_with_timeout(path: &Path, timeout: Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 Error::Internal(format!("could not create state directory: {error}"))
@@ -110,7 +126,7 @@ impl State {
             .map_err(|error| Error::Internal(format!("could not open state database: {error}")))?;
         set_private_file(path)?;
         connection
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(timeout)
             .map_err(db_error("busy timeout"))?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
@@ -717,6 +733,34 @@ mod tests {
             error.to_string().contains("schema version 99"),
             "unexpected error: {error}"
         );
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn a_locked_database_times_out() {
+        let path = path();
+        let first = State::open_at_with_timeout(&path, Duration::from_millis(50))
+            .expect("first connection");
+        let second = State::open_at_with_timeout(&path, Duration::from_millis(50))
+            .expect("second connection");
+
+        first
+            .connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("write lock");
+        let id = ListingId::new("123").expect("id");
+        let error = second
+            .mark_seen("key", &id, 1)
+            .expect_err("second writer must not succeed");
+        assert!(
+            error.to_string().contains("locked"),
+            "unexpected error: {error}"
+        );
+        first
+            .connection
+            .execute_batch("ROLLBACK")
+            .expect("release lock");
+
         let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 }

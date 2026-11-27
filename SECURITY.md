@@ -13,6 +13,8 @@ public issue for a vulnerability, a leaked token or account data.
 - Test fixtures must be sanitized before they are committed.
 - Public seller profiles are returned only by the explicit `profile` command;
   `search` and `get` omit contact names, phone numbers and exact coordinates.
+- The MCP server exposes only read tools and never writes local state. It uses
+  the same data minimization as the CLI.
 - If a credential is exposed, rotate it at the source; deleting a commit is not
   enough.
 
